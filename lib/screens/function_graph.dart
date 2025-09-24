@@ -1,0 +1,2373 @@
+// ...existing code...
+import 'dart:async';
+import 'dart:ui' as ui;
+import 'dart:io';
+import 'dart:convert';
+// dart:typed_data not needed because foundation.dart re-exports necessary types
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:fl_chart/fl_chart.dart';
+import 'package:math_expressions/math_expressions.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:flutter/rendering.dart';
+import 'package:provider/provider.dart';
+// shared_preferences removed from this file (not used here)
+import '../theme_provider.dart';
+
+// Painter para sombrear el área entre A y B usando los puntos muestreados de la primera función
+class _AreaPainter extends CustomPainter {
+  final List<Offset> dataPoints;
+  final double minX, maxX, minY, maxY;
+  final double? a, b;
+
+  _AreaPainter(
+      {required this.dataPoints,
+      required this.minX,
+      required this.maxX,
+      required this.minY,
+      required this.maxY,
+      required this.a,
+      required this.b});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (dataPoints.isEmpty || a == null || b == null) return;
+    final path = Path();
+    final pts = dataPoints;
+
+    // Transformacion de coordenadas de datos a pixeles
+    double sx(double x) => (x - minX) / (maxX - minX) * size.width;
+    double sy(double y) =>
+        size.height - (y - minY) / (maxY - minY) * size.height;
+
+    final A = a! < b! ? a! : b!;
+    final B = a! < b! ? b! : a!;
+
+    // Construir path: empezar en (A, y(A)), recorrer hasta (B, y(B)), cerrar hacia baseline (y=0)
+    final rangePts =
+        pts.where((p) => p.dx >= A && p.dx <= B && p.dy.isFinite).toList();
+    if (rangePts.isEmpty) return;
+
+    path.moveTo(sx(rangePts.first.dx), sy(rangePts.first.dy));
+    for (final p in rangePts) {
+      path.lineTo(sx(p.dx), sy(p.dy));
+    }
+    final baseline = 0.0;
+    path.lineTo(sx(rangePts.last.dx), sy(baseline));
+    path.lineTo(sx(rangePts.first.dx), sy(baseline));
+    path.close();
+
+    final paint = Paint()..color = Colors.teal.withValues(alpha: 0.12);
+    canvas.drawPath(path, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
+}
+
+class FunctionGraph extends StatefulWidget {
+  final String? initialFunction;
+  const FunctionGraph({Key? key, this.initialFunction}) : super(key: key);
+
+  @override
+  _FunctionGraphState createState() => _FunctionGraphState();
+}
+
+class _FunctionGraphState extends State<FunctionGraph> {
+  final TextEditingController _functionController = TextEditingController();
+  final GlobalKey _chartKey = GlobalKey();
+
+  List<List<Offset>> _pointsPerFunction = [];
+  List<String> _validFunctions = [];
+  String _errorMessage = '';
+  String _currentFunction = '';
+  bool _isLoading = false;
+  Timer? _debounce;
+
+  // Overlays y toggles
+  bool _showAxes = true;
+  bool _showCrosshair = true;
+  bool _showAsymptotes = false;
+  bool _showIntercepts = true;
+  bool _showExtrema = false;
+  bool _showCurveIntersections = false;
+  double? _crossX;
+  double? _crossY;
+
+  // Marcadores de área
+  double? _areaA;
+  double? _areaB;
+
+  // Controles de rango
+  late TextEditingController _minXController;
+  late TextEditingController _maxXController;
+  double _minX = -10;
+  double _maxX = 10;
+  bool _zoomToFit = true;
+
+  // Muestreo adaptativo optimizado
+  final double _adaptiveYThreshold = 2.0; // Menor umbral para mayor precisión
+  final int _adaptiveMaxDepth =
+      8; // Permite más refinamiento en zonas complejas
+  final int _initialSegments =
+      300; // Más segmentos iniciales para curvas suaves
+
+  // Discontinuidades verticales detectadas
+  List<double> _verticalLines = [];
+
+  // Marcadores derivados
+  List<FlSpot> _zeroSpots = [];
+  List<FlSpot> _extremaSpots = [];
+
+  // Para comparar/áreas entre funciones
+  final List<Expression> _expressions = [];
+  List<int> _barFuncMap =
+      []; // map de cada LineChartBarData -> índice de función (-1=marker)
+  List<FlSpot> _curveIntersections = [];
+  int _primaryFuncIndex = 0;
+
+  // Paleta
+  List<Color> _colors = const [
+    Colors.blue,
+    Colors.redAccent,
+    Colors.green,
+    Colors.purple,
+    Colors.orange,
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.initialFunction != null && widget.initialFunction!.isNotEmpty) {
+      _functionController.text = widget.initialFunction!;
+      _graphFunction(widget.initialFunction!);
+    }
+    _minXController = TextEditingController(text: '-10');
+    _maxXController = TextEditingController(text: '10');
+  }
+
+  // --- Simpson en background ----
+  bool _useSimpson = false;
+  double? _simpsonCachedValue;
+  int _simpsonRequestId = 0; // para invalidar resultados obsoletos
+
+  static double _simpsonCompute(Map<String, dynamic> args) {
+    // args: {'expr': exprString, 'a': double, 'b': double, 'n': int}
+    final exprString = args['expr'] as String;
+    final a = args['a'] as double;
+    final b = args['b'] as double;
+    final n = args['n'] as int;
+    try {
+      final p = ShuntingYardParser();
+      final Expression exp = p.parse(exprString);
+      double A = a < b ? a : b;
+      double B = a < b ? b : a;
+      if (A == B) return 0.0;
+      int nn = n;
+      if (nn % 2 == 1) nn = nn + 1; // Simpson requires even n
+      final step = (B - A) / nn;
+      double s = 0.0;
+      for (int i = 0; i <= nn; i++) {
+        final x = A + i * step;
+        final cm = ContextModel();
+        cm.bindVariable(Variable('x'), Number(x));
+        final y = exp.evaluate(EvaluationType.REAL, cm);
+        if (y is double && y.isFinite) {
+          if (i == 0 || i == n)
+            s += y;
+          else if (i % 2 == 0)
+            s += 2 * y;
+          else
+            s += 4 * y;
+        }
+      }
+      return s * step / 3.0;
+    } catch (_) {
+      return double.nan;
+    }
+  }
+
+  void _computeSimpsonForCurrent({int n = 800}) async {
+    if (_expressions.isEmpty) return;
+    if (_areaA == null || _areaB == null) return;
+    final exprStr = _validFunctions[_primaryFuncIndex];
+    final requestId = ++_simpsonRequestId;
+    setState(() {
+      _simpsonCachedValue = null; // indicando que estamos calculando
+    });
+    final args = {'expr': exprStr, 'a': _areaA!, 'b': _areaB!, 'n': n};
+    final res = await compute(_simpsonCompute, args);
+    if (!mounted) return;
+    // ignorar resultados obsoletos
+    if (requestId != _simpsonRequestId) return;
+    setState(() {
+      _simpsonCachedValue = res.isFinite ? res : null;
+    });
+  }
+
+  // Helper para escribir bytes en archivo temporal y retornar path
+  Future<String> _writeBytesToTempFile(Uint8List bytes,
+      {String ext = 'png'}) async {
+    final directory = await getTemporaryDirectory();
+    final safeExt = ext.startsWith('.') ? ext.substring(1) : ext;
+    final filePath =
+        '${directory.path}/grafico_${DateTime.now().millisecondsSinceEpoch}.' +
+            safeExt;
+    final file = File(filePath);
+    await file.writeAsBytes(bytes, flush: true);
+    return filePath;
+  }
+
+  // OPTIMIZACIÓN: Función estática para procesar funciones en background thread
+  static Map<String, dynamic> _processFunctionsInBackground(
+      List<String> functions) {
+    final processed = <String>[];
+    String errorMessage = '';
+
+    for (String function in functions) {
+      String cleanedFunction = function
+          .toLowerCase()
+          .replaceAll(RegExp(r'^\s*y\s*=\s*'), '')
+          .trim()
+          .replaceAll('\u03c0', 'pi')
+          .replaceAll('\u00f7', '/')
+          .replaceAll('\u00d7', '*');
+
+      // OPTIMIZACIÓN: RegExp combinadas para reducir pasadas
+      cleanedFunction = cleanedFunction
+          .replaceAllMapped(
+              RegExp(r"(\d)\s*([a-z(])"), (m) => '${m[1]}*${m[2]}')
+          .replaceAllMapped(
+              RegExp(r"(\))\s*([0-9a-z(])"), (m) => '${m[1]}*${m[2]}')
+          .replaceAllMapped(RegExp(r"([x])\s*\("), (m) => '${m[1]}*(')
+          .replaceAllMapped(
+              RegExp(r'\be\s*\^\s*([a-z0-9.(]+)'), (m) => 'exp(${m[1]})');
+
+      if (!_balancedParenthesesStatic(cleanedFunction)) {
+        errorMessage +=
+            'Función "$cleanedFunction" tiene paréntesis desbalanceados\n';
+        continue;
+      }
+
+      if (!RegExp(r'^[a-z0-9\s+\-*/().^]+$').hasMatch(cleanedFunction)) {
+        errorMessage +=
+            'Función "$cleanedFunction" contiene caracteres no válidos\n';
+        continue;
+      }
+
+      processed.add(cleanedFunction);
+    }
+
+    return {
+      'processed': processed,
+      'error': errorMessage,
+    };
+  }
+
+  // Versión estática para usar en compute()
+  static bool _balancedParenthesesStatic(String s) {
+    int lvl = 0;
+    for (int i = 0; i < s.length; i++) {
+      if (s[i] == '(') lvl++;
+      if (s[i] == ')') {
+        lvl--;
+        if (lvl < 0) return false;
+      }
+    }
+    return lvl == 0;
+  }
+
+  // Evaluar expresión en x devolviendo double (maneja errores y NaN)
+  double _evaluateY(Expression exp, double x) {
+    try {
+      final cm = ContextModel();
+      cm.bindVariable(Variable('x'), Number(x));
+      final val = exp.evaluate(EvaluationType.REAL, cm);
+      if (val is double) return val;
+      if (val is int) return val.toDouble();
+      return double.nan;
+    } catch (_) {
+      return double.nan;
+    }
+  }
+
+  // Muestreo adaptativo: subdivide segmentos donde la curvatura/variación en Y es grande
+  List<Offset> _adaptiveSample(Expression exp, double minX, double maxX) {
+    final List<Offset> out = [];
+    if (minX >= maxX) return out;
+
+    final int segments = _initialSegments;
+    final double step = (maxX - minX) / segments;
+
+    // Crear puntos iniciales
+    for (int i = 0; i <= segments; i++) {
+      final x = minX + i * step;
+      final y = _evaluateY(exp, x);
+      out.add(Offset(x, y));
+    }
+
+    // Refinar segmentos con mayor precisión
+    final List<Offset> refined = [];
+    for (int i = 1; i < out.length; i++) {
+      final p0 = out[i - 1];
+      final p1 = out[i];
+      refined.addAll(_refineSegment(exp, p0, p1, 0));
+    }
+
+    // Asegurar último punto
+    if (out.isNotEmpty) refined.add(out.last);
+    return refined;
+  }
+
+  // Refina recursivamente un segmento si la diferencia en Y excede umbral o si profundidad no superada
+  List<Offset> _refineSegment(Expression exp, Offset a, Offset b, int depth) {
+    final List<Offset> res = [];
+    res.add(a);
+    if (depth >= _adaptiveMaxDepth) return res;
+
+    final xa = a.dx;
+    final xb = b.dx;
+    final xm = (xa + xb) / 2.0;
+    final ym = _evaluateY(exp, xm);
+
+    // Si hay NaN o infinito, fragmentar por discontinuidad
+    if (!ym.isFinite || !a.dy.isFinite || !b.dy.isFinite) {
+      res.add(Offset(xm, ym));
+      res.add(b);
+      return res;
+    }
+
+    // Refinar si la diferencia es significativa
+    final yInterpolated = a.dy + (b.dy - a.dy) * ((xm - xa) / (xb - xa));
+    final diff = (ym - yInterpolated).abs();
+
+    if (diff > _adaptiveYThreshold && (xb - xa).abs() > 1e-6) {
+      // Refinar ambas mitades
+      final left = _refineSegment(exp, a, Offset(xm, ym), depth + 1);
+      final right = _refineSegment(exp, Offset(xm, ym), b, depth + 1);
+      // Fusionar sin duplicar xm
+      res.clear();
+      res.addAll(left);
+      res.addAll(right.skip(1));
+      return res;
+    } else {
+      // Suficiente aproximación
+      res.add(b);
+      return res;
+    }
+  }
+
+  // Derivados: ceros, extremos y discontinuidades
+  void _computeDerivedPoints(List<Offset> pts) {
+    _zeroSpots = [];
+    _extremaSpots = [];
+    _verticalLines = [];
+
+    if (pts.length < 3) return;
+
+    // Ceros por cruce de signo (y0*y1 < 0)
+    for (int i = 1; i < pts.length; i++) {
+      final p0 = pts[i - 1];
+      final p1 = pts[i];
+      if (!p0.dy.isFinite || !p1.dy.isFinite) continue;
+      if ((p0.dy == 0) && p0.dx.isFinite) {
+        _zeroSpots.add(FlSpot(p0.dx, 0));
+      } else if ((p0.dy > 0 && p1.dy < 0) || (p0.dy < 0 && p1.dy > 0)) {
+        final double t = (0 - p0.dy) / (p1.dy - p0.dy);
+        final double xz = p0.dx + t * (p1.dx - p0.dx);
+        _zeroSpots.add(FlSpot(xz, 0));
+      }
+    }
+
+    // Extremos por cambio de signo en diferencia (y1 - y0) vs (y2 - y1)
+    for (int i = 1; i < pts.length - 1; i++) {
+      final p0 = pts[i - 1];
+      final p1 = pts[i];
+      final p2 = pts[i + 1];
+      if (!p0.dy.isFinite || !p1.dy.isFinite || !p2.dy.isFinite) continue;
+      final d1 = p1.dy - p0.dy;
+      final d2 = p2.dy - p1.dy;
+      if (d1 == 0 && d2 == 0) continue;
+      if ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) {
+        final mid = [p0, p1, p2].reduce((a, b) =>
+            (d1 > 0 && d2 < 0) ? (a.dy > b.dy ? a : b) : (a.dy < b.dy ? a : b));
+        _extremaSpots.add(FlSpot(mid.dx, mid.dy));
+      }
+    }
+
+    // Discontinuidades aproximadas (NaN o no finito aislado en medio)
+    for (int i = 1; i < pts.length - 1; i++) {
+      final p = pts[i];
+      if (!p.dy.isFinite && pts[i - 1].dy.isFinite && !pts[i + 1].dy.isFinite) {
+        _verticalLines.add(p.dx);
+      }
+    }
+  }
+
+  void _graphFunction(String functionInput) {
+    if (_debounce?.isActive ?? false) _debounce!.cancel();
+    _debounce = Timer(const Duration(milliseconds: 500), () async {
+      if (!mounted) return;
+      setState(() {
+        _isLoading = true;
+        _pointsPerFunction.clear();
+        _validFunctions.clear();
+        _expressions.clear();
+        _errorMessage = '';
+        _currentFunction = functionInput.trim();
+        _zeroSpots = [];
+        _extremaSpots = [];
+        _verticalLines = [];
+        _curveIntersections = [];
+      });
+
+      if (_currentFunction.isEmpty) {
+        setState(() {
+          _errorMessage = 'Ingresa al menos una función válida';
+          _isLoading = false;
+        });
+        return;
+      }
+
+      try {
+        List<String> functions = _currentFunction
+            .split(',')
+            .map((f) => f.trim())
+            .where((f) => f.isNotEmpty)
+            .toList();
+
+        if (functions.isEmpty) {
+          setState(() {
+            _errorMessage = 'Ingresa al menos una función válida';
+            _isLoading = false;
+          });
+          return;
+        }
+
+        // OPTIMIZACIÓN: Procesar funciones en background thread para mejorar fluidez
+        final processResult =
+            await compute(_processFunctionsInBackground, functions);
+        final processedFunctions = processResult['processed'] as List<String>;
+        final bgErrorMessage = processResult['error'] as String;
+
+        if (bgErrorMessage.isNotEmpty) {
+          setState(() {
+            _errorMessage += bgErrorMessage;
+          });
+        }
+
+        if (processedFunctions.isEmpty) {
+          setState(() {
+            _errorMessage = 'No se pudieron procesar las funciones válidas';
+            _isLoading = false;
+          });
+          return;
+        }
+
+        for (String cleanedFunction in processedFunctions) {
+          try {
+            final p = ShuntingYardParser();
+            final Expression exp = p.parse(cleanedFunction);
+
+            double rmin = _minX;
+            double rmax = _maxX;
+            if (_zoomToFit) {
+              rmin = -10;
+              rmax = 10;
+            }
+            final sampled = _adaptiveSample(exp, rmin, rmax);
+
+            final filtered = <Offset>[];
+            int validPoints = 0;
+            for (var pt in sampled) {
+              if (pt.dy.isFinite && pt.dy.abs() < 1000) {
+                filtered.add(pt);
+                validPoints++;
+              } else {
+                filtered.add(Offset(pt.dx, double.nan));
+              }
+            }
+
+            if (validPoints > 0) {
+              _pointsPerFunction.add(filtered);
+              _validFunctions.add(cleanedFunction);
+              _expressions.add(exp);
+            } else {
+              setState(() {
+                _errorMessage +=
+                    'Función "$cleanedFunction" no generó puntos válidos\n';
+              });
+            }
+          } catch (e) {
+            setState(() {
+              _errorMessage +=
+                  'Error al parsear función "$cleanedFunction": $e\n';
+            });
+          }
+        }
+
+        // Derivados para la primera función (principal)
+        if (_pointsPerFunction.isNotEmpty) {
+          _computeDerivedPoints(_pointsPerFunction.first);
+        }
+
+        // Cruces f1-f2 si hay al menos dos expresiones
+        if (_expressions.length >= 2) {
+          _curveIntersections = _findIntersections(
+            _expressions[0],
+            _expressions[1],
+            _displayMinX,
+            _displayMaxX,
+          );
+        }
+
+        if (_pointsPerFunction.isEmpty) {
+          setState(() {
+            _errorMessage =
+                'No se generaron puntos válidos para ninguna función';
+            _isLoading = false;
+          });
+          return;
+        }
+      } catch (e) {
+        setState(() {
+          _errorMessage = 'Error general al procesar funciones: $e';
+          _isLoading = false;
+        });
+        return;
+      }
+
+      setState(() {
+        _isLoading = false;
+      });
+    });
+  }
+
+  Future<Uint8List?> _captureChartImage() async {
+    try {
+      if (!mounted || _chartKey.currentContext == null) return null;
+      final boundary =
+          _chartKey.currentContext!.findRenderObject() as RenderRepaintBoundary;
+      final image = await boundary.toImage(
+          pixelRatio: MediaQuery.of(context).devicePixelRatio);
+      final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+      return byteData?.buffer.asUint8List();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error al capturar el gráfico')),
+        );
+      }
+      return null;
+    }
+  }
+
+  Future<void> _shareChartImage() async {
+    try {
+      // Crear imagen enriquecida con información matemática
+      final enrichedImageBytes = await _createEnrichedChartImage();
+      if (enrichedImageBytes == null) return;
+
+      // Escribir en archivo temporal
+      final filePath =
+          await _writeBytesToTempFile(enrichedImageBytes, ext: 'png');
+
+      // Crear texto rico para compartir
+      final shareText = _createShareText();
+
+      await Share.shareXFiles([XFile(filePath)], text: shareText);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content:
+                Text('📊 Gráfico matemático compartido con análisis completo'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error al compartir el gráfico: $e')),
+        );
+      }
+    }
+  }
+
+  // Crear imagen enriquecida con información matemática y sello
+  Future<Uint8List?> _createEnrichedChartImage() async {
+    try {
+      // Capturar el gráfico original
+      final originalImageBytes = await _captureChartImage();
+      if (originalImageBytes == null) return null;
+
+      // Decodificar imagen original
+      final originalImage = await decodeImageFromList(originalImageBytes);
+
+      // Crear canvas expandido para agregar información
+      final recorder = ui.PictureRecorder();
+      final canvas = Canvas(recorder);
+
+      // Dimensiones expandidas (agregar espacio para información)
+      final originalWidth = originalImage.width.toDouble();
+      final originalHeight = originalImage.height.toDouble();
+      final infoHeight = 300.0; // Espacio para información
+      final totalHeight = originalHeight + infoHeight;
+
+      // Fondo blanco
+      canvas.drawRect(
+        Rect.fromLTWH(0, 0, originalWidth, totalHeight),
+        Paint()..color = Colors.white,
+      );
+
+      // Dibujar imagen original del gráfico
+      canvas.drawImage(originalImage, Offset.zero, Paint());
+
+      // Crear información matemática
+      await _drawMathematicalInfo(
+          canvas, originalWidth, originalHeight, infoHeight);
+
+      // Agregar sello de la app
+      await _drawAppWatermark(canvas, originalWidth, totalHeight);
+
+      // Convertir a imagen
+      final picture = recorder.endRecording();
+      final finalImage =
+          await picture.toImage(originalWidth.toInt(), totalHeight.toInt());
+      final byteData =
+          await finalImage.toByteData(format: ui.ImageByteFormat.png);
+
+      return byteData?.buffer.asUint8List();
+    } catch (e) {
+      print('Error creando imagen enriquecida: $e');
+      return await _captureChartImage(); // Fallback a imagen original
+    }
+  }
+
+  // Dibujar información matemática en la imagen
+  Future<void> _drawMathematicalInfo(Canvas canvas, double width,
+      double chartHeight, double infoHeight) async {
+    final paint = Paint()..color = const Color(0xFFF8F9FA);
+    final rect = Rect.fromLTWH(0, chartHeight, width, infoHeight);
+    canvas.drawRect(rect, paint);
+
+    // Borde superior
+    canvas.drawLine(
+      Offset(0, chartHeight),
+      Offset(width, chartHeight),
+      Paint()
+        ..color = Colors.grey.shade300
+        ..strokeWidth = 2,
+    );
+
+    final textPainter = TextPainter(
+      textDirection: TextDirection.ltr,
+      textAlign: TextAlign.left,
+    );
+
+    double yOffset = chartHeight + 20;
+    const double leftMargin = 20;
+    const double lineHeight = 25;
+
+    // Título
+    textPainter.text = TextSpan(
+      text: '📊 ANÁLISIS MATEMÁTICO COMPLETO',
+      style: TextStyle(
+        fontSize: 18,
+        fontWeight: FontWeight.bold,
+        color: Colors.blue.shade800,
+      ),
+    );
+    textPainter.layout();
+    textPainter.paint(canvas, Offset(leftMargin, yOffset));
+    yOffset += 35;
+
+    // Información de la función
+    final infoLines = [
+      '🔢 f(x) = $_currentFunction',
+      '📐 Dominio: [${_displayMinX.toStringAsFixed(2)}, ${_displayMaxX.toStringAsFixed(2)}]',
+      '📈 Rango: [${_minY.toStringAsFixed(2)}, ${_maxY.toStringAsFixed(2)}]',
+      '🎯 Tipo: ${_classifyFunction()}',
+      '📊 Continuidad: ${_isFunctionContinuous() ? "Continua" : "Discontinua"}',
+      '🔄 Simetría: ${_checkSymmetry()}',
+    ];
+
+    if (_zeroSpots.isNotEmpty) {
+      infoLines.add(
+          '🎯 Raíces: ${_zeroSpots.map((s) => s.x.toStringAsFixed(3)).join(", ")}');
+    }
+
+    if (_areaA != null && _areaB != null) {
+      final areaValue = _useSimpson && _simpsonCachedValue != null
+          ? _simpsonCachedValue!.toStringAsFixed(4)
+          : _computeAreaLabel();
+      infoLines.add(
+          '📊 Área [${_areaA!.toStringAsFixed(2)}, ${_areaB!.toStringAsFixed(2)}]: $areaValue');
+    }
+
+    // Dibujar líneas de información
+    for (final line in infoLines) {
+      if (yOffset + lineHeight > chartHeight + infoHeight - 40)
+        break; // No overflow
+
+      textPainter.text = TextSpan(
+        text: line,
+        style: const TextStyle(
+          fontSize: 14,
+          color: Colors.black87,
+          fontWeight: FontWeight.w500,
+        ),
+      );
+      textPainter.layout();
+      textPainter.paint(canvas, Offset(leftMargin, yOffset));
+      yOffset += lineHeight;
+    }
+  }
+
+  // Dibujar sello de la app
+  Future<void> _drawAppWatermark(
+      Canvas canvas, double width, double height) async {
+    final textPainter = TextPainter(
+      textDirection: TextDirection.ltr,
+      textAlign: TextAlign.right,
+    );
+
+    // Sello principal
+    textPainter.text = TextSpan(
+      text: '🧮 CALCULATOR 2.0 - Scientific',
+      style: TextStyle(
+        fontSize: 16,
+        fontWeight: FontWeight.bold,
+        color: Colors.blue.shade700,
+      ),
+    );
+    textPainter.layout();
+    textPainter.paint(
+        canvas, Offset(width - textPainter.width - 20, height - 60));
+
+    // Fecha y hora
+    final now = DateTime.now();
+    final dateStr =
+        '${now.day}/${now.month}/${now.year} ${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
+
+    textPainter.text = TextSpan(
+      text: '📅 Generado el: $dateStr',
+      style: const TextStyle(
+        fontSize: 12,
+        color: Colors.grey,
+      ),
+    );
+    textPainter.layout();
+    textPainter.paint(
+        canvas, Offset(width - textPainter.width - 20, height - 35));
+
+    // URL o marca adicional
+    textPainter.text = const TextSpan(
+      text: '⚡ Análisis matemático avanzado',
+      style: TextStyle(
+        fontSize: 11,
+        color: Colors.grey,
+        fontStyle: FontStyle.italic,
+      ),
+    );
+    textPainter.layout();
+    textPainter.paint(
+        canvas, Offset(width - textPainter.width - 20, height - 15));
+  }
+
+  // Crear texto rico para compartir
+  String _createShareText() {
+    final buffer = StringBuffer();
+    buffer.writeln('📊 GRÁFICO MATEMÁTICO - Calculator 2.0');
+    buffer.writeln('');
+    buffer.writeln('🔢 Función: f(x) = $_currentFunction');
+    buffer.writeln(
+        '📐 Dominio: [${_displayMinX.toStringAsFixed(2)}, ${_displayMaxX.toStringAsFixed(2)}]');
+    buffer.writeln(
+        '📈 Rango: [${_minY.toStringAsFixed(2)}, ${_maxY.toStringAsFixed(2)}]');
+    buffer.writeln('🎯 Tipo: ${_classifyFunction()}');
+    buffer.writeln(
+        '📊 ${_isFunctionContinuous() ? "Función continua" : "Función discontinua"}');
+
+    if (_zeroSpots.isNotEmpty) {
+      buffer.writeln(
+          '🎯 Raíces: ${_zeroSpots.map((s) => s.x.toStringAsFixed(3)).join(", ")}');
+    }
+
+    if (_areaA != null && _areaB != null) {
+      final areaValue = _useSimpson && _simpsonCachedValue != null
+          ? _simpsonCachedValue!.toStringAsFixed(4)
+          : _computeAreaLabel();
+      buffer.writeln('📊 Área calculada: $areaValue');
+    }
+
+    buffer.writeln('');
+    buffer.writeln('🧮 Generado con Calculator 2.0 - Scientific');
+    buffer.writeln('⚡ Análisis matemático avanzado con gráficos interactivos');
+
+    return buffer.toString();
+  }
+
+  Future<void> _saveChartImage() async {
+    try {
+      final imageBytes = await _captureChartImage();
+      if (imageBytes == null) return;
+
+      // Intentar guardar en Downloads (Android) o Galería
+      bool saved = false;
+
+      // Intentamos guardar en la galería con ImageGallerySaver (requiere permisos en Android)
+      try {
+        if (Platform.isAndroid) {
+          final status = await Permission.storage.request();
+          if (status.isGranted) {
+            try {
+              final dir = await getExternalStorageDirectory();
+              if (dir != null) {
+                final downloadsLike = Directory('${dir.path}/Download');
+                final targetDir = await (await downloadsLike.exists()
+                    ? Future.value(downloadsLike)
+                    : Future.value(dir));
+                final path =
+                    '${targetDir.path}/grafico_${DateTime.now().millisecondsSinceEpoch}.png';
+                final file = File(path);
+                await file.create(recursive: true);
+                await file.writeAsBytes(imageBytes, flush: true);
+                // Gallery save skipped in emulator run (plugin removed). Fallback: leave file in storage.
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('Gráfico guardado en: $path')));
+                }
+                saved = true;
+              }
+            } catch (_) {
+              // ignore and fallback
+            }
+          }
+        } else if (Platform.isIOS) {
+          // iOS: ImageGallerySaver puede guardar en Photos
+          // On iOS we would save to Photos via platform plugin; in this build we fallback to temp file
+          final tmpPath = await _writeBytesToTempFile(imageBytes, ext: 'png');
+          if (tmpPath.isNotEmpty) {
+            if (mounted)
+              ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('Gráfico guardado en: $tmpPath')));
+            saved = true;
+          }
+        }
+      } catch (e) {
+        // ignore and fallback
+      }
+
+      if (!saved) {
+        // Fallback: escribir en temp y notificar ruta
+        final filePath = await _writeBytesToTempFile(imageBytes, ext: 'png');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Gráfico guardado en: $filePath')),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error al guardar el gráfico: $e')),
+        );
+      }
+    }
+  }
+
+  // Exportar datos muestreados a CSV (primeras funciones)
+  Future<void> _exportCsv() async {
+    try {
+      if (_pointsPerFunction.isEmpty) return;
+      final buffer = StringBuffer();
+      // Cabecera: x, f1, f2, ...
+      final headers =
+          ['x'] + List.generate(_pointsPerFunction.length, (i) => 'f${i + 1}');
+      buffer.writeln(headers.join(','));
+
+      // Tomamos la unión de xs únicos ordenados de la primera función muestreada
+      final xs = _pointsPerFunction.first
+          .where((p) => p.dx.isFinite)
+          .map((p) => p.dx)
+          .toList();
+
+      for (final x in xs) {
+        final row = <String>[];
+        row.add(x.toString());
+        for (int i = 0; i < _pointsPerFunction.length; i++) {
+          final pts = _pointsPerFunction[i];
+          final match = pts.firstWhere((p) => p.dx == x,
+              orElse: () => Offset(x, double.nan));
+          final y = match.dy;
+          row.add(y.isFinite ? y.toString() : '');
+        }
+        buffer.writeln(row.join(','));
+      }
+
+      final bytes = utf8.encode(buffer.toString());
+      // Guardar CSV en archivo temporal en el hilo principal
+      final filePath =
+          await _writeBytesToTempFile(Uint8List.fromList(bytes), ext: 'csv');
+      await Share.shareXFiles([XFile(filePath)],
+          text: 'Datos CSV de $_currentFunction');
+      if (mounted)
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('CSV exportado')));
+    } catch (e) {
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Error al exportar CSV')));
+    }
+  }
+
+  void _insertSymbol(String symbol) {
+    final int cursorPosition = _functionController.selection.baseOffset < 0
+        ? _functionController.text.length
+        : _functionController.selection.baseOffset;
+    final String currentText = _functionController.text;
+    final String newText = currentText.substring(0, cursorPosition) +
+        symbol +
+        currentText.substring(cursorPosition);
+    _functionController.text = newText;
+    _functionController.selection = TextSelection.fromPosition(
+      TextPosition(offset: cursorPosition + symbol.length),
+    );
+    _graphFunction(newText);
+  }
+
+  // Helper para construir secciones de información
+  Widget _buildInfoSection(String title, List<String> items) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(
+              fontWeight: FontWeight.w600,
+              fontSize: 14,
+              color: Colors.black87,
+            ),
+          ),
+          const SizedBox(height: 4),
+          ...items.map((item) => Padding(
+                padding: const EdgeInsets.only(left: 12, bottom: 2),
+                child: Row(
+                  children: [
+                    const Text('• ', style: TextStyle(color: Colors.grey)),
+                    Expanded(
+                      child: Text(
+                        item,
+                        style: const TextStyle(
+                            fontSize: 13, color: Colors.black54),
+                      ),
+                    ),
+                  ],
+                ),
+              )),
+        ],
+      ),
+    );
+  }
+
+  // Método para analizar el comportamiento de la función
+  String _analyzeFunctionBehavior() {
+    if (_pointsPerFunction.isEmpty) return 'Sin datos';
+
+    final points = _pointsPerFunction.first;
+    final validPoints = points.where((p) => p.dy.isFinite).toList();
+
+    if (validPoints.length < 3) return 'Datos insuficientes';
+
+    // Analizar tendencia
+    double minY = validPoints.map((p) => p.dy).reduce((a, b) => a < b ? a : b);
+    double maxY = validPoints.map((p) => p.dy).reduce((a, b) => a > b ? a : b);
+
+    // Clasificar función
+    List<String> characteristics = [];
+
+    if (minY >= 0)
+      characteristics.add('Positiva');
+    else if (maxY <= 0)
+      characteristics.add('Negativa');
+    else
+      characteristics.add('Cambia de signo');
+
+    // Verificar monotonía básica
+    bool increasing = true, decreasing = true;
+    for (int i = 1; i < validPoints.length; i++) {
+      if (validPoints[i].dy < validPoints[i - 1].dy) increasing = false;
+      if (validPoints[i].dy > validPoints[i - 1].dy) decreasing = false;
+    }
+
+    if (increasing)
+      characteristics.add('Creciente');
+    else if (decreasing)
+      characteristics.add('Decreciente');
+    else
+      characteristics.add('No monótona');
+
+    return characteristics.join(', ');
+  }
+
+  // Método para obtener información de derivada en un punto
+  String _getDerivativeInfo(double x) {
+    try {
+      if (_expressions.isEmpty) return 'No disponible';
+
+      final expr =
+          _expressions[_primaryFuncIndex.clamp(0, _expressions.length - 1)];
+
+      const h = 0.0001;
+      final y1 = _evaluateY(expr, x - h);
+      final y2 = _evaluateY(expr, x + h);
+
+      if (!y1.isFinite || !y2.isFinite) return 'No derivable';
+
+      final derivative = (y2 - y1) / (2 * h);
+      return "f'(${x.toStringAsFixed(2)}) ≈ ${derivative.toStringAsFixed(4)}";
+    } catch (e) {
+      return 'Error en cálculo';
+    }
+  }
+
+  // Verifica si la función es continua en el intervalo visible
+  bool _isFunctionContinuous() {
+    if (_pointsPerFunction.isEmpty) return false;
+
+    final points = _pointsPerFunction.first;
+    int discontinuities = 0;
+
+    for (int i = 1; i < points.length; i++) {
+      final current = points[i];
+      final previous = points[i - 1];
+
+      if (!current.dy.isFinite || !previous.dy.isFinite) {
+        discontinuities++;
+        continue;
+      }
+
+      // Detectar saltos grandes que podrían indicar discontinuidad
+      final jump = (current.dy - previous.dy).abs();
+      final interval = (current.dx - previous.dx).abs();
+
+      if (interval > 0 && jump / interval > 100) {
+        discontinuities++;
+      }
+    }
+
+    return discontinuities <=
+        points.length * 0.02; // Tolerar hasta 2% de discontinuidades
+  }
+
+  // Clasifica el tipo de función basado en su comportamiento
+  String _classifyFunction() {
+    if (_pointsPerFunction.isEmpty) return 'Desconocida';
+
+    final points =
+        _pointsPerFunction.first.where((p) => p.dy.isFinite).toList();
+    if (points.length < 5) return 'Datos insuficientes';
+
+    final funcStr = _currentFunction.toLowerCase();
+
+    // Clasificación por patrón de función
+    if (funcStr.contains('sin') ||
+        funcStr.contains('cos') ||
+        funcStr.contains('tan')) {
+      return 'Trigonométrica';
+    } else if (funcStr.contains('log') || funcStr.contains('ln')) {
+      return 'Logarítmica';
+    } else if (funcStr.contains('exp') || funcStr.contains('^')) {
+      return 'Exponencial/Potencia';
+    } else if (funcStr.contains('sqrt') || funcStr.contains('abs')) {
+      return 'Radical/Valor absoluto';
+    }
+
+    // Análisis por comportamiento numérico
+    final maxY = points.map((p) => p.dy).reduce((a, b) => a > b ? a : b);
+    final minY = points.map((p) => p.dy).reduce((a, b) => a < b ? a : b);
+    final range = maxY - minY;
+
+    if (range < 0.001) return 'Constante';
+
+    // Verificar linealidad
+    bool isLinear = true;
+    if (points.length >= 3) {
+      final slope =
+          (points[1].dy - points[0].dy) / (points[1].dx - points[0].dx);
+      for (int i = 2; i < points.length; i++) {
+        final currentSlope = (points[i].dy - points[i - 1].dy) /
+            (points[i].dx - points[i - 1].dx);
+        if ((currentSlope - slope).abs() > 0.1) {
+          isLinear = false;
+          break;
+        }
+      }
+    }
+
+    if (isLinear) return 'Lineal';
+
+    return 'Polinómica/No lineal';
+  }
+
+  // Obtiene la pendiente instantánea en un punto
+  String _getInstantaneousSlope(double x) {
+    try {
+      if (_expressions.isEmpty) return 'N/A';
+
+      final expr =
+          _expressions[_primaryFuncIndex.clamp(0, _expressions.length - 1)];
+      const h = 0.0001;
+
+      final y1 = _evaluateY(expr, x - h);
+      final y2 = _evaluateY(expr, x + h);
+
+      if (!y1.isFinite || !y2.isFinite) return 'Indefinida';
+
+      final slope = (y2 - y1) / (2 * h);
+
+      if (slope.abs() < 0.0001) return '≈ 0 (horizontal)';
+      if (slope.abs() > 1000) return '∞ (vertical)';
+
+      return slope.toStringAsFixed(4);
+    } catch (e) {
+      return 'Error';
+    }
+  }
+
+  // Verifica simetría de la función
+  String _checkSymmetry() {
+    if (_pointsPerFunction.isEmpty) return 'No determinada';
+
+    final points =
+        _pointsPerFunction.first.where((p) => p.dy.isFinite).toList();
+    if (points.length < 10) return 'Datos insuficientes';
+
+    final centerX = (_displayMinX + _displayMaxX) / 2;
+    bool isEven = true;
+    bool isOdd = true;
+    int checksEven = 0;
+    int checksOdd = 0;
+
+    // Verificar simetría par (f(-x) = f(x)) y impar (f(-x) = -f(x))
+    for (final point in points) {
+      final x = point.dx - centerX; // Centrar en el origen
+      final y = point.dy;
+
+      if (x.abs() < 0.1) continue; // Saltar puntos muy cerca del centro
+
+      // Buscar punto simétrico
+      final symmetricX = centerX - x;
+      final symmetricPoint =
+          points.where((p) => (p.dx - symmetricX).abs() < 0.1).firstOrNull;
+
+      if (symmetricPoint != null) {
+        final symmetricY = symmetricPoint.dy;
+
+        // Verificar simetría par
+        if ((y - symmetricY).abs() > 0.1)
+          isEven = false;
+        else
+          checksEven++;
+
+        // Verificar simetría impar
+        if ((y + symmetricY).abs() > 0.1)
+          isOdd = false;
+        else
+          checksOdd++;
+      }
+    }
+
+    if (isEven && checksEven > 3) return 'Par (f(-x) = f(x))';
+    if (isOdd && checksOdd > 3) return 'Impar (f(-x) = -f(x))';
+
+    return 'Asimétrica';
+  }
+
+  double get _minY => _pointsPerFunction.isEmpty
+      ? -10
+      : _pointsPerFunction
+              .expand((points) =>
+                  points.where((p) => p.dy.isFinite).map((p) => p.dy))
+              .reduce((a, b) => a < b ? a : b) -
+          1;
+
+  double get _maxY => _pointsPerFunction.isEmpty
+      ? 10
+      : _pointsPerFunction
+              .expand((points) =>
+                  points.where((p) => p.dy.isFinite).map((p) => p.dy))
+              .reduce((a, b) => a > b ? a : b) +
+          1;
+
+  List<LineChartBarData> _getFlSpots() {
+    final bars = <LineChartBarData>[];
+    _barFuncMap = [];
+
+    // Curvas principales (segmentadas para no unir a través de NaN)
+    for (int i = 0; i < _pointsPerFunction.length; i++) {
+      final color = _colors[i % _colors.length];
+      final belowColor = color.withValues(alpha: 0.1);
+
+      List<FlSpot> segment = [];
+      void flushSegment() {
+        if (segment.length >= 2) {
+          bars.add(LineChartBarData(
+            spots: List<FlSpot>.from(segment),
+            isCurved: true,
+            color: color,
+            barWidth: 2,
+            dotData: const FlDotData(show: false),
+            belowBarData: BarAreaData(show: true, color: belowColor),
+          ));
+          _barFuncMap.add(i);
+        }
+        segment = [];
+      }
+
+      for (final p in _pointsPerFunction[i]) {
+        if (p.dy.isFinite) {
+          segment.add(FlSpot(p.dx, p.dy));
+        } else {
+          flushSegment();
+        }
+      }
+      flushSegment();
+    }
+
+    // Marcadores de intersecciones con X (puntos solos)
+    if (_showIntercepts && _zeroSpots.isNotEmpty) {
+      bars.add(
+        LineChartBarData(
+          spots: _zeroSpots,
+          isCurved: false,
+          color: Colors.transparent,
+          barWidth: 0,
+          dotData: FlDotData(
+            show: true,
+            getDotPainter: (s, p, bar, i) => FlDotCirclePainter(
+              color: Colors.deepOrange,
+              strokeColor: Colors.white,
+              strokeWidth: 1.5,
+              radius: 3.5,
+            ),
+          ),
+        ),
+      );
+      _barFuncMap.add(-1);
+    }
+
+    // Marcadores de extremos locales
+    if (_showExtrema && _extremaSpots.isNotEmpty) {
+      bars.add(
+        LineChartBarData(
+          spots: _extremaSpots,
+          isCurved: false,
+          color: Colors.transparent,
+          barWidth: 0,
+          dotData: FlDotData(
+            show: true,
+            getDotPainter: (s, p, bar, i) => FlDotCirclePainter(
+              color: Colors.teal,
+              strokeColor: Colors.white,
+              strokeWidth: 1.5,
+              radius: 3.5,
+            ),
+          ),
+        ),
+      );
+      _barFuncMap.add(-1);
+    }
+
+    // Cruces f1-f2
+    if (_showCurveIntersections && _curveIntersections.isNotEmpty) {
+      bars.add(
+        LineChartBarData(
+          spots: _curveIntersections,
+          isCurved: false,
+          color: Colors.transparent,
+          barWidth: 0,
+          dotData: FlDotData(
+            show: true,
+            getDotPainter: (s, p, bar, i) => FlDotCirclePainter(
+              color: Colors.purple,
+              strokeColor: Colors.white,
+              strokeWidth: 1.5,
+              radius: 3.5,
+            ),
+          ),
+        ),
+      );
+      _barFuncMap.add(-1);
+    }
+
+    return bars;
+  }
+
+  ExtraLinesData _buildExtraLines() {
+    final h = <HorizontalLine>[];
+    final v = <VerticalLine>[];
+
+    if (_showAxes) {
+      h.add(HorizontalLine(
+        y: 0,
+        color: Colors.grey[600]!.withValues(alpha: 0.35),
+        strokeWidth: 1,
+      ));
+      v.add(VerticalLine(
+        x: 0,
+        color: Colors.grey[600]!.withValues(alpha: 0.35),
+        strokeWidth: 1,
+      ));
+    }
+
+    // Asíntotas aproximadas
+    if (_showAsymptotes && _verticalLines.isNotEmpty) {
+      for (final x in _verticalLines) {
+        v.add(VerticalLine(
+          x: x,
+          color: Colors.redAccent.withValues(alpha: 0.35),
+          strokeWidth: 1,
+          dashArray: [6, 4],
+        ));
+      }
+    }
+
+    // Crosshair
+    if (_showCrosshair && _crossX != null) {
+      v.add(VerticalLine(
+        x: _crossX!,
+        color: Colors.blueGrey.withValues(alpha: 0.5),
+        strokeWidth: 0.8,
+        dashArray: [4, 4],
+      ));
+    }
+    if (_showCrosshair && _crossY != null) {
+      h.add(HorizontalLine(
+        y: _crossY!,
+        color: Colors.blueGrey.withValues(alpha: 0.5),
+        strokeWidth: 0.8,
+        dashArray: [4, 4],
+      ));
+    }
+
+    // Marcadores A y B para área
+    if (_areaA != null) {
+      v.add(VerticalLine(
+        x: _areaA!,
+        color: Colors.teal.withValues(alpha: 0.6),
+        strokeWidth: 1.2,
+        dashArray: [8, 6],
+      ));
+    }
+    if (_areaB != null) {
+      v.add(VerticalLine(
+        x: _areaB!,
+        color: Colors.teal.withValues(alpha: 0.6),
+        strokeWidth: 1.2,
+        dashArray: [8, 6],
+      ));
+    }
+
+    return ExtraLinesData(horizontalLines: h, verticalLines: v);
+  }
+
+  double get _displayMinX {
+    if (_pointsPerFunction.isEmpty) return _minX;
+    try {
+      final xs = _pointsPerFunction
+          .expand((pts) => pts.map((p) => p.dx))
+          .where((x) => x.isFinite)
+          .toList();
+      if (xs.isEmpty) return _minX;
+      final double mn = xs.reduce((a, b) => a < b ? a : b);
+      return _zoomToFit ? mn : _minX;
+    } catch (_) {
+      return _minX;
+    }
+  }
+
+  double get _displayMaxX {
+    if (_pointsPerFunction.isEmpty) return _maxX;
+    try {
+      final xs = _pointsPerFunction
+          .expand((pts) => pts.map((p) => p.dx))
+          .where((x) => x.isFinite)
+          .toList();
+      if (xs.isEmpty) return _maxX;
+      final double mx = xs.reduce((a, b) => a > b ? a : b);
+      return _zoomToFit ? mx : _maxX;
+    } catch (_) {
+      return _maxX;
+    }
+  }
+
+  String _computeAreaLabel() {
+    if (_areaA == null || _areaB == null) return 'N/A';
+    if (_expressions.isEmpty || _primaryFuncIndex >= _expressions.length) {
+      final pts = _pointsPerFunction.first.where((p) => p.dy.isFinite).toList();
+      if (pts.length < 2) return 'N/A';
+      final a = _areaA!;
+      final b = _areaB!;
+      final start = a < b ? a : b;
+      final end = a < b ? b : a;
+      double area = 0.0;
+      for (int i = 1; i < pts.length; i++) {
+        final x0 = pts[i - 1].dx;
+        final x1 = pts[i].dx;
+        if (x1 <= start || x0 >= end) continue;
+
+        final l = x0.clamp(start, end);
+        final r = x1.clamp(start, end);
+        final y0 = pts[i - 1].dy;
+        final y1 = pts[i].dy;
+
+        final yL = y0 + (y1 - y0) * ((l - x0) / (x1 - x0));
+        final yR = y0 + (y1 - y0) * ((r - x0) / (x1 - x0));
+        area += (yL + yR) * (r - l) / 2.0;
+      }
+      return area.toStringAsFixed(4);
+    }
+    final a = _areaA!;
+    final b = _areaB!;
+    final area = _trapArea(_expressions[_primaryFuncIndex], a, b, n: 800);
+    return area.isFinite ? area.toStringAsFixed(4) : 'N/A';
+  }
+
+  String _computeAreaBetweenLabel() {
+    if (_areaA == null || _areaB == null) return 'N/A';
+    if (_expressions.length < 2) return 'N/A';
+    final a = _areaA!;
+    final b = _areaB!;
+    final n = 800;
+    double area = 0.0;
+    final A = a < b ? a : b;
+    final B = a < b ? b : a;
+    final step = (B - A) / n;
+    for (int i = 0; i < n; i++) {
+      final x0 = A + i * step;
+      final x1 = x0 + step;
+      final yA0 = _evaluateY(_expressions[0], x0);
+      final yA1 = _evaluateY(_expressions[0], x1);
+      final yB0 = _evaluateY(_expressions[1], x0);
+      final yB1 = _evaluateY(_expressions[1], x1);
+      if (!yA0.isFinite || !yA1.isFinite || !yB0.isFinite || !yB1.isFinite)
+        continue;
+      final d0 = yA0 - yB0;
+      final d1 = yA1 - yB1;
+      area += (d0 + d1) * (x1 - x0) / 2.0;
+    }
+    return area.isFinite ? area.toStringAsFixed(4) : 'N/A';
+  }
+
+  List<FlSpot> _findIntersections(
+      Expression a, Expression b, double start, double end,
+      {int n = 1200}) {
+    final List<FlSpot> out = [];
+    if (start >= end) {
+      final t = start;
+      start = end;
+      end = t;
+    }
+    final step = (end - start) / n;
+    double? prevX;
+    double? prevDiff;
+    for (int i = 0; i <= n; i++) {
+      final x = start + i * step;
+      final ya = _evaluateY(a, x);
+      final yb = _evaluateY(b, x);
+      if (!ya.isFinite || !yb.isFinite) {
+        prevX = null;
+        prevDiff = null;
+        continue;
+      }
+      final d = ya - yb;
+      if (prevX != null &&
+          prevDiff != null &&
+          d.isFinite &&
+          (prevDiff * d) < 0) {
+        final t = prevDiff / (prevDiff - d);
+        final xc = prevX + t * (x - prevX);
+        final yc = _evaluateY(a, xc);
+        if (yc.isFinite) out.add(FlSpot(xc, yc));
+      }
+      prevX = x;
+      prevDiff = d;
+    }
+    return out;
+  }
+
+  double _trapArea(Expression exp, double a, double b, {int n = 600}) {
+    if (a == b) return 0.0;
+    final A = a < b ? a : b;
+    final B = a < b ? b : a;
+    final step = (B - A) / n;
+    double area = 0.0;
+    for (int i = 0; i < n; i++) {
+      final x0 = A + i * step;
+      final x1 = x0 + step;
+      final y0 = _evaluateY(exp, x0);
+      final y1 = _evaluateY(exp, x1);
+      if (!y0.isFinite || !y1.isFinite) continue;
+      area += (y0 + y1) * (x1 - x0) / 2.0;
+    }
+    return a <= b ? area : -area;
+  }
+
+  Widget _buildSymbolButton(String symbol, {double fontSize = 16}) {
+    final theme = Provider.of<ThemeProvider>(context);
+    return ElevatedButton(
+      onPressed: () => _insertSymbol(symbol),
+      style: ElevatedButton.styleFrom(
+        backgroundColor: Colors.grey[200],
+        foregroundColor: theme.accentColor,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+          side: BorderSide(color: Colors.grey[400]!, width: 1),
+        ),
+        elevation: 2,
+        minimumSize: const Size(50, 50),
+        padding: EdgeInsets.zero,
+      ),
+      child: Text(
+        symbol,
+        style: TextStyle(
+          fontSize: fontSize,
+          color: theme.accentColor,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+  }
+
+  // Métodos auxiliares para el tutorial
+  Widget _buildTutorialItem(String functions, String description) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            flex: 3,
+            child: Text(
+              functions,
+              style: const TextStyle(
+                fontFamily: 'monospace',
+                fontSize: 13,
+                color: Colors.black87,
+              ),
+            ),
+          ),
+          Expanded(
+            flex: 2,
+            child: Text(
+              description,
+              style: TextStyle(
+                fontSize: 13,
+                color: Colors.grey[600],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildExampleButton(String function, String label) {
+    final theme = Provider.of<ThemeProvider>(context);
+    return ElevatedButton(
+      onPressed: () {
+        _functionController.text = function;
+        _graphFunction(function);
+      },
+      style: ElevatedButton.styleFrom(
+        backgroundColor: theme.accentColor.withOpacity(0.1),
+        foregroundColor: theme.accentColor,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(8),
+          side: BorderSide(color: theme.accentColor.withOpacity(0.3)),
+        ),
+        elevation: 1,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            function,
+            style: const TextStyle(
+              fontFamily: 'monospace',
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          Text(
+            label,
+            style: const TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.normal,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Provider.of<ThemeProvider>(context);
+    final primary = Theme.of(context).colorScheme.primary;
+    final width = MediaQuery.of(context).size.width;
+    final padding = width < 400 ? 8.0 : 16.0;
+    final buttonFontSize = width < 400 ? 14.0 : 16.0;
+    final chartPadding = width < 400 ? 8.0 : 16.0;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Gráfico de Funciones',
+            style: TextStyle(fontWeight: FontWeight.w700, color: Colors.white)),
+        backgroundColor: primary,
+        elevation: 0,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back, color: Colors.white),
+          onPressed: () => Navigator.pop(context),
+        ),
+        actions: [],
+      ),
+      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+      body: SafeArea(
+        child: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: EdgeInsets.all(padding),
+                child: TextField(
+                  controller: _functionController,
+                  style: TextStyle(
+                    color: Colors.black87,
+                    fontSize: width < 400 ? 16 : 18,
+                  ),
+                  decoration: InputDecoration(
+                    labelText: 'Funciones (ej. x^2, sin(x), cos(x))',
+                    labelStyle: TextStyle(color: Colors.grey[600]),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderSide:
+                          BorderSide(color: theme.accentColor, width: 2),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    filled: true,
+                    fillColor: Colors.grey[100],
+                    errorText:
+                        _errorMessage.isNotEmpty ? _errorMessage.trim() : null,
+                    contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 12),
+                  ),
+                  onChanged: _graphFunction,
+                  onSubmitted: _graphFunction,
+                ),
+              ),
+              Padding(
+                padding: EdgeInsets.symmetric(horizontal: padding),
+                child: Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  alignment: WrapAlignment.center,
+                  children: [
+                    for (var symbol in [
+                      'x',
+                      '^',
+                      '+',
+                      '-',
+                      '*',
+                      '/',
+                      '(',
+                      ')',
+                      'sin(',
+                      'cos(',
+                      'tan(',
+                      'sqrt(',
+                      'ln(',
+                      'exp(',
+                      'abs(',
+                      'pi'
+                    ])
+                      _buildSymbolButton(symbol, fontSize: buttonFontSize),
+                  ],
+                ),
+              ),
+              SizedBox(height: padding),
+              Padding(
+                padding: EdgeInsets.symmetric(horizontal: padding),
+                child: ElevatedButton(
+                  onPressed: () => _graphFunction(_functionController.text),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: primary,
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    textStyle: const TextStyle(
+                        fontSize: 16, fontWeight: FontWeight.w700),
+                  ),
+                  child: const Text('Graficar'),
+                ),
+              ),
+
+              // Tutorial y ejemplos sencillos
+              Padding(
+                padding: EdgeInsets.all(padding),
+                child: Card(
+                  elevation: 2,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12)),
+                  child: ExpansionTile(
+                    leading:
+                        Icon(Icons.lightbulb_outline, color: theme.accentColor),
+                    title: Text(
+                      '💡 Tutorial y Ejemplos',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                        color: Colors.black87,
+                        fontSize: buttonFontSize,
+                      ),
+                    ),
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '📚 Funciones que puedes usar:',
+                              style: TextStyle(
+                                fontWeight: FontWeight.w600,
+                                fontSize: buttonFontSize,
+                                color: Colors.black87,
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            _buildTutorialItem('• x^2, x^3', 'Potencias'),
+                            _buildTutorialItem(
+                                '• sin(x), cos(x), tan(x)', 'Trigonométricas'),
+                            _buildTutorialItem(
+                                '• sqrt(x), ln(x), exp(x)', 'Otras funciones'),
+                            _buildTutorialItem('• abs(x)', 'Valor absoluto'),
+                            _buildTutorialItem('• pi, e', 'Constantes'),
+                            const SizedBox(height: 16),
+                            Text(
+                              '🎯 Prueba estos ejemplos:',
+                              style: TextStyle(
+                                fontWeight: FontWeight.w600,
+                                fontSize: buttonFontSize,
+                                color: Colors.black87,
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: [
+                                _buildExampleButton('x^2', 'Parábola'),
+                                _buildExampleButton('sin(x)', 'Seno'),
+                                _buildExampleButton('cos(x)', 'Coseno'),
+                                _buildExampleButton('x^3 - 2*x', 'Cúbica'),
+                                _buildExampleButton('sqrt(x)', 'Raíz'),
+                                _buildExampleButton('1/x', 'Hipérbola'),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              if (_pointsPerFunction.isNotEmpty)
+                Padding(
+                  padding: EdgeInsets.symmetric(
+                      vertical: padding, horizontal: padding),
+                  child: Text(
+                    'f(x) = $_currentFunction',
+                    style: const TextStyle(
+                        fontSize: 16,
+                        color: Colors.black87,
+                        fontWeight: FontWeight.w600),
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+              Container(
+                height: 400,
+                margin: EdgeInsets.all(chartPadding),
+                decoration: BoxDecoration(
+                  color: Colors.grey[50],
+                  borderRadius: BorderRadius.circular(16),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color.fromRGBO(0, 0, 0, 0.1),
+                      blurRadius: 8,
+                      offset: Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: _isLoading
+                    ? Center(
+                        child:
+                            CircularProgressIndicator(color: theme.accentColor))
+                    : _pointsPerFunction.isEmpty
+                        ? Center(
+                            child: Text(
+                              'Ingresa una función para graficar',
+                              style: TextStyle(
+                                fontSize: 18,
+                                color: Colors.grey[600],
+                              ),
+                            ),
+                          )
+                        : RepaintBoundary(
+                            key: _chartKey,
+                            child: Stack(
+                              children: [
+                                // Área sombreada (dibujo en canvas debajo de la curva)
+                                Positioned.fill(
+                                  child: CustomPaint(
+                                    painter: _AreaPainter(
+                                      dataPoints: _pointsPerFunction.first,
+                                      minX: _displayMinX,
+                                      maxX: _displayMaxX,
+                                      minY: _minY.clamp(-1000, 1000),
+                                      maxY: _maxY.clamp(-1000, 1000),
+                                      a: _areaA,
+                                      b: _areaB,
+                                    ),
+                                  ),
+                                ),
+                                LineChart(
+                                  LineChartData(
+                                    minX: _displayMinX,
+                                    maxX: _displayMaxX,
+                                    minY: _minY.clamp(-1000, 1000),
+                                    maxY: _maxY.clamp(-1000, 1000),
+                                    clipData: FlClipData.all(),
+                                    gridData: FlGridData(
+                                      show: true,
+                                      drawVerticalLine: true,
+                                      horizontalInterval:
+                                          (_maxY - _minY).abs() / 6,
+                                      verticalInterval: 2,
+                                      getDrawingHorizontalLine: (value) =>
+                                          FlLine(
+                                        color: Colors.grey[300]!,
+                                        strokeWidth: 0.5,
+                                      ),
+                                      getDrawingVerticalLine: (value) => FlLine(
+                                        color: Colors.grey[300]!,
+                                        strokeWidth: 0.5,
+                                      ),
+                                    ),
+                                    titlesData: FlTitlesData(
+                                      leftTitles: AxisTitles(
+                                        sideTitles: SideTitles(
+                                          showTitles: true,
+                                          interval: (_maxY - _minY).abs() / 6,
+                                          reservedSize: 48,
+                                          getTitlesWidget: (value, meta) {
+                                            if (value == meta.min ||
+                                                value == meta.max) {
+                                              return const SizedBox.shrink();
+                                            }
+                                            return Text(
+                                              value.toStringAsFixed(1),
+                                              style: TextStyle(
+                                                fontSize: width < 400 ? 12 : 14,
+                                                color: Colors.black87,
+                                              ),
+                                              textAlign: TextAlign.right,
+                                            );
+                                          },
+                                        ),
+                                      ),
+                                      bottomTitles: AxisTitles(
+                                        sideTitles: SideTitles(
+                                          showTitles: true,
+                                          interval: 2,
+                                          getTitlesWidget: (value, meta) {
+                                            return Text(
+                                              value.toStringAsFixed(0),
+                                              style: TextStyle(
+                                                fontSize: width < 400 ? 12 : 14,
+                                                color: Colors.black87,
+                                              ),
+                                            );
+                                          },
+                                        ),
+                                      ),
+                                      rightTitles: const AxisTitles(
+                                          sideTitles:
+                                              SideTitles(showTitles: false)),
+                                      topTitles: const AxisTitles(
+                                          sideTitles:
+                                              SideTitles(showTitles: false)),
+                                    ),
+                                    borderData: FlBorderData(
+                                      show: true,
+                                      border: Border.all(
+                                          color: Colors.grey[500]!, width: 1),
+                                    ),
+                                    extraLinesData: _buildExtraLines(),
+                                    lineBarsData: _getFlSpots(),
+                                    lineTouchData: LineTouchData(
+                                      enabled: true,
+                                      handleBuiltInTouches: true,
+                                      touchCallback: (event, response) {
+                                        if (!_showCrosshair) return;
+                                        if (!mounted) return;
+                                        if (response == null ||
+                                            response.lineBarSpots == null ||
+                                            response.lineBarSpots!.isEmpty) {
+                                          setState(() {
+                                            _crossX = null;
+                                            _crossY = null;
+                                          });
+                                          return;
+                                        }
+                                        final spot =
+                                            response.lineBarSpots!.first;
+                                        setState(() {
+                                          _crossX = spot.x;
+                                          _crossY = spot.y;
+                                        });
+                                      },
+                                      touchTooltipData: LineTouchTooltipData(
+                                        getTooltipColor: (touchedSpot) =>
+                                            Colors.blue[700]!,
+                                        tooltipPadding: const EdgeInsets.all(8),
+                                        getTooltipItems: (touchedSpots) =>
+                                            touchedSpots.map((s) {
+                                          final idx = s.barIndex;
+                                          String name = 'punto';
+                                          if (idx >= 0 &&
+                                              idx < _barFuncMap.length) {
+                                            final fIdx = _barFuncMap[idx];
+                                            if (fIdx >= 0 &&
+                                                fIdx < _validFunctions.length) {
+                                              name = _validFunctions[fIdx];
+                                            } else if (fIdx == -1) {
+                                              name = 'marker';
+                                            }
+                                          }
+                                          return LineTooltipItem(
+                                            '$name\nx: ${s.x.toStringAsFixed(2)}\ny: ${s.y.toStringAsFixed(2)}',
+                                            const TextStyle(
+                                                color: Colors.white),
+                                          );
+                                        }).toList(),
+                                      ),
+                                    ),
+                                  ),
+                                  duration: const Duration(milliseconds: 300),
+                                  curve: Curves.easeInOut,
+                                ),
+                              ],
+                            ),
+                          ),
+              ),
+              // Rango X y Zoom-to-fit
+              Padding(
+                padding: EdgeInsets.symmetric(horizontal: padding),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    SizedBox(
+                      width: 100,
+                      child: TextField(
+                        controller: _minXController,
+                        keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true),
+                        decoration: const InputDecoration(labelText: 'min X'),
+                        onSubmitted: (v) {
+                          final val = double.tryParse(v);
+                          if (val != null) {
+                            setState(() {
+                              _minX = val;
+                              _zoomToFit = false;
+                            });
+                          }
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    SizedBox(
+                      width: 100,
+                      child: TextField(
+                        controller: _maxXController,
+                        keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true),
+                        decoration: const InputDecoration(labelText: 'max X'),
+                        onSubmitted: (v) {
+                          final val = double.tryParse(v);
+                          if (val != null) {
+                            setState(() {
+                              _maxX = val;
+                              _zoomToFit = false;
+                            });
+                          }
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Row(
+                      children: [
+                        const Text('Zoom to fit'),
+                        Switch(
+                          value: _zoomToFit,
+                          onChanged: (v) => setState(() {
+                            _zoomToFit = v;
+                            // Forzar recálculo del gráfico con nuevo zoom
+                            if (_currentFunction.isNotEmpty) {
+                              _graphFunction(_currentFunction);
+                            }
+                          }),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              // Toggles de overlays
+              if (_pointsPerFunction.isNotEmpty)
+                Padding(
+                  padding:
+                      EdgeInsets.symmetric(horizontal: padding, vertical: 6),
+                  child: Wrap(
+                    spacing: 8,
+                    runSpacing: 6,
+                    alignment: WrapAlignment.center,
+                    children: [
+                      FilterChip(
+                        label: const Text('Ejes en 0'),
+                        selected: _showAxes,
+                        onSelected: (v) => setState(() => _showAxes = v),
+                      ),
+                      FilterChip(
+                        label: const Text('Crosshair'),
+                        selected: _showCrosshair,
+                        onSelected: (v) => setState(() => _showCrosshair = v),
+                      ),
+                      FilterChip(
+                        label: const Text('Asíntotas'),
+                        selected: _showAsymptotes,
+                        onSelected: (v) => setState(() => _showAsymptotes = v),
+                      ),
+                      FilterChip(
+                        label: const Text('Intersecciones X'),
+                        selected: _showIntercepts,
+                        onSelected: (v) => setState(() => _showIntercepts = v),
+                      ),
+                      FilterChip(
+                        label: const Text('Extremos'),
+                        selected: _showExtrema,
+                        onSelected: (v) => setState(() => _showExtrema = v),
+                      ),
+                      FilterChip(
+                        label: const Text('Simpson'),
+                        selected: _useSimpson,
+                        onSelected: (v) => setState(() {
+                          _useSimpson = v;
+                          if (_useSimpson) _computeSimpsonForCurrent();
+                        }),
+                      ),
+                      if (_validFunctions.length >= 2)
+                        FilterChip(
+                          label: const Text('Cruces f1–f2'),
+                          selected: _showCurveIntersections,
+                          onSelected: (v) =>
+                              setState(() => _showCurveIntersections = v),
+                        ),
+                    ],
+                  ),
+                ),
+              // Área entre A y B
+              if (_pointsPerFunction.isNotEmpty)
+                Padding(
+                  padding:
+                      EdgeInsets.symmetric(horizontal: padding, vertical: 4),
+                  child: Column(
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          SizedBox(
+                            width: 90,
+                            child: TextField(
+                              decoration: const InputDecoration(labelText: 'A'),
+                              keyboardType:
+                                  const TextInputType.numberWithOptions(
+                                      decimal: true),
+                              textInputAction: TextInputAction.done,
+                              onChanged: (v) {
+                                final val = double.tryParse(v);
+                                setState(() => _areaA = val);
+                                if (_useSimpson) _computeSimpsonForCurrent();
+                              },
+                              onSubmitted: (v) {
+                                final val = double.tryParse(v);
+                                setState(() => _areaA = val);
+                                if (_useSimpson) _computeSimpsonForCurrent();
+                              },
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          SizedBox(
+                            width: 90,
+                            child: TextField(
+                              decoration: const InputDecoration(labelText: 'B'),
+                              keyboardType:
+                                  const TextInputType.numberWithOptions(
+                                      decimal: true),
+                              textInputAction: TextInputAction.done,
+                              onChanged: (v) {
+                                final val = double.tryParse(v);
+                                setState(() => _areaB = val);
+                                if (_useSimpson) _computeSimpsonForCurrent();
+                              },
+                              onSubmitted: (v) {
+                                final val = double.tryParse(v);
+                                setState(() => _areaB = val);
+                                if (_useSimpson) _computeSimpsonForCurrent();
+                              },
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          // Mostrar siempre la caja de área (mostrará N/A si no es posible calcular)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 10, vertical: 8),
+                            decoration: BoxDecoration(
+                              color: Colors.teal.withValues(alpha: 0.12),
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(color: Colors.teal, width: 1),
+                            ),
+                            child: Text(
+                              _useSimpson
+                                  ? (_simpsonCachedValue == null
+                                      ? 'Simpson: calculando...'
+                                      : 'Simpson: ${_simpsonCachedValue!.toStringAsFixed(4)}')
+                                  : 'Área f1: ${_computeAreaLabel()}',
+                              style: TextStyle(
+                                  color: Colors.teal[800],
+                                  fontWeight: FontWeight.w600),
+                            ),
+                          ),
+                        ],
+                      ),
+                      if (_validFunctions.length >= 2 &&
+                          _areaA != null &&
+                          _areaB != null)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 10, vertical: 8),
+                            decoration: BoxDecoration(
+                              color: Colors.purple.withValues(alpha: 0.10),
+                              borderRadius: BorderRadius.circular(10),
+                              border:
+                                  Border.all(color: Colors.purple, width: 1),
+                            ),
+                            child: Text(
+                              'Área f1−f2: ${_computeAreaBetweenLabel()}',
+                              style: const TextStyle(
+                                  color: Colors.purple,
+                                  fontWeight: FontWeight.w600),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              // Panel de información matemática enriquecida
+              if (_pointsPerFunction.isNotEmpty)
+                Padding(
+                  padding: EdgeInsets.all(padding),
+                  child: Card(
+                    elevation: 3,
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12)),
+                    child: ExpansionTile(
+                      leading: Icon(Icons.analytics_outlined, color: primary),
+                      title: Text(
+                        '📈 Análisis Matemático',
+                        style: TextStyle(
+                          fontWeight: FontWeight.w600,
+                          color: Colors.black87,
+                          fontSize: buttonFontSize,
+                        ),
+                      ),
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              // Información de la función actual
+                              _buildInfoSection('📊 Función Actual', [
+                                'f(x) = $_currentFunction',
+                                'Dominio X: [${_displayMinX.toStringAsFixed(1)}, ${_displayMaxX.toStringAsFixed(1)}]',
+                                'Rango Y: [${_minY.toStringAsFixed(1)}, ${_maxY.toStringAsFixed(1)}]',
+                                'Comportamiento: ${_analyzeFunctionBehavior()}',
+                              ]),
+
+                              // Puntos especiales
+                              if (_zeroSpots.isNotEmpty)
+                                _buildInfoSection(
+                                    '🎯 Intersecciones con X',
+                                    _zeroSpots
+                                        .map((spot) =>
+                                            'x = ${spot.x.toStringAsFixed(3)}')
+                                        .toList()),
+
+                              if (_extremaSpots.isNotEmpty)
+                                _buildInfoSection(
+                                    '⛰️ Extremos Locales',
+                                    _extremaSpots
+                                        .map((spot) =>
+                                            '(${spot.x.toStringAsFixed(3)}, ${spot.y.toStringAsFixed(3)})')
+                                        .toList()),
+
+                              // Información del área
+                              if (_areaA != null && _areaB != null)
+                                _buildInfoSection('🔢 Cálculo de Área', [
+                                  'Intervalo: [${_areaA!.toStringAsFixed(2)}, ${_areaB!.toStringAsFixed(2)}]',
+                                  'Longitud: ${(_areaB! - _areaA!).abs().toStringAsFixed(2)}',
+                                  _useSimpson && _simpsonCachedValue != null
+                                      ? 'Área (Simpson): ${_simpsonCachedValue!.toStringAsFixed(4)}'
+                                      : 'Área aproximada: ${_computeAreaLabel()}',
+                                ]),
+
+                              // Estadísticas del gráfico
+                              if (_pointsPerFunction.isNotEmpty)
+                                _buildInfoSection('📐 Estadísticas', [
+                                  'Puntos calculados: ${_pointsPerFunction.first.length}',
+                                  'Funciones graficadas: ${_validFunctions.length}',
+                                  if (_curveIntersections.isNotEmpty)
+                                    'Intersecciones entre curvas: ${_curveIntersections.length}',
+                                  'Resolución: ${((_displayMaxX - _displayMinX) / _pointsPerFunction.first.length).toStringAsFixed(4)} unidades/punto',
+                                ]),
+
+                              // Propiedades matemáticas adicionales
+                              if (_pointsPerFunction.isNotEmpty)
+                                _buildInfoSection('🔬 Propiedades Avanzadas', [
+                                  'Función ${_isFunctionContinuous() ? "continua" : "discontinua"} en el intervalo',
+                                  'Tipo de función: ${_classifyFunction()}',
+                                  if (_expressions.isNotEmpty &&
+                                      _crossX != null)
+                                    'Pendiente instantánea en cursor: ${_getInstantaneousSlope(_crossX!)}',
+                                  'Simetría: ${_checkSymmetry()}',
+                                ]),
+
+                              // Coordenadas del cursor
+                              if (_crossX != null && _crossY != null)
+                                _buildInfoSection('📍 Posición Cursor', [
+                                  'x = ${_crossX!.toStringAsFixed(4)}',
+                                  'y = ${_crossY!.toStringAsFixed(4)}',
+                                  'f(${_crossX!.toStringAsFixed(2)}) = ${_crossY!.toStringAsFixed(4)}',
+                                  _getDerivativeInfo(_crossX!),
+                                ]),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+
+              // Acciones
+              if (_pointsPerFunction.isNotEmpty)
+                Padding(
+                  padding: EdgeInsets.symmetric(
+                      vertical: padding, horizontal: padding),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      ElevatedButton.icon(
+                        onPressed: _shareChartImage,
+                        icon: const Icon(Icons.share, size: 20),
+                        label: const Text('Compartir',
+                            style: TextStyle(fontSize: 14)),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: primary,
+                          foregroundColor: Colors.white,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 16, vertical: 12),
+                        ),
+                      ),
+                      const SizedBox(width: 16),
+                      ElevatedButton.icon(
+                        onPressed: _exportCsv,
+                        icon: const Icon(Icons.table_chart, size: 20),
+                        label:
+                            const Text('CSV', style: TextStyle(fontSize: 14)),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: primary,
+                          foregroundColor: Colors.white,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 16, vertical: 12),
+                        ),
+                      ),
+                      const SizedBox(width: 16),
+                      ElevatedButton.icon(
+                        onPressed: _saveChartImage,
+                        icon: const Icon(Icons.download, size: 20),
+                        label: const Text('Descargar',
+                            style: TextStyle(fontSize: 14)),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: primary,
+                          foregroundColor: Colors.white,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 16, vertical: 12),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              SizedBox(height: padding),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _debounce?.cancel();
+    _functionController.dispose();
+    super.dispose();
+  }
+
+  @override
+  void setState(VoidCallback fn) {
+    if (!mounted) return;
+    super.setState(fn);
+  }
+}

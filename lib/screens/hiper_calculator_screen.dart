@@ -1,0 +1,3129 @@
+import 'dart:async';
+import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:share_plus/share_plus.dart';
+
+import 'package:calculator_scientific/expression_evaluator.dart';
+import 'package:calculator_scientific/screens/statistics_screen.dart';
+import 'package:calculator_scientific/screens/function_graph.dart';
+import 'package:calculator_scientific/screens/unit_converter_screen.dart';
+import 'package:calculator_scientific/screens/exchange_screen.dart';
+import 'package:calculator_scientific/screens/guess_game.dart';
+import 'package:calculator_scientific/screens/cosmic_equation_chase.dart';
+import 'package:calculator_scientific/screens/help_screen.dart';
+import 'package:calculator_scientific/screens/suggestions_screen.dart';
+
+import 'package:calculator_scientific/ads_helper.dart';
+import '../app_text.dart'; // 🌍 TRADUCCIONES
+
+class HiperCalculatorScreen extends StatefulWidget {
+  @override
+  _HiperCalculatorScreenState createState() => _HiperCalculatorScreenState();
+}
+
+class _HiperCalculatorScreenState extends State<HiperCalculatorScreen> {
+  String _expression = '';
+  String _result = '';
+  List<String> _history = [];
+  int _selectedMode =
+      0; // 0: Básico, 1: Trigonométrico, 2: Avanzado, 3: Constantes, 4: Fracciones
+
+  // Estados de la calculadora estilo HiPER
+  String _angleMode = 'RAD'; // RAD, DEG, GRAD
+  String _numberFormat = 'NORMAL'; // NORMAL, SCI, ENG
+  bool _isShiftActive = false; // Para funciones secundarias
+  bool _isAlphaActive = false; // Para variables/constantes
+
+  // 💰 SISTEMA DE ANUNCIOS INTELIGENTE
+  int _calculationCount = 0; // Contador de cálculos
+  static const int _adFrequency = 12; // Mostrar anuncio cada 12 cálculos
+
+  // Estados para manejo de fracciones
+  bool _inFractionMode = false;
+  String _currentNumerator = '';
+  String _currentDenominator = '';
+  bool _editingDenominator = false;
+
+  final ExpressionEvaluator _expressionEvaluator = ExpressionEvaluator();
+
+  // ÉPICO: Panel flotante de operadores rápidos
+  bool _showQuickOperators = false;
+  Timer? _quickOperatorsTimer;
+
+  // **ELIMINADO**: Cache de formateo - MathDisplayWidget maneja esto automáticamente
+
+  // OPTIMIZACIÓN: Debounce para actualizaciones de UI - MEJORADO
+  Timer? _uiUpdateDebounce;
+  Timer? _calculationDebounce;
+  static const Duration _debounceDelay = Duration(
+      milliseconds: 50); // Reducido de 60fps a ~20fps para mejor rendimiento
+
+  // 🚪 SISTEMA DE DOUBLE-BACK PARA SALIR
+
+  @override
+  void dispose() {
+    _uiUpdateDebounce?.cancel();
+    _calculationDebounce?.cancel(); // NUEVO: Cancelar debounce de cálculos
+    _quickOperatorsTimer?.cancel(); // ÉPICO: Cancelar timer del panel flotante
+    super.dispose();
+  }
+
+  // OPTIMIZACIÓN: setState con debounce para 60fps
+  void _optimizedSetState() {
+    _uiUpdateDebounce?.cancel();
+    // Actualizar inmediatamente sólo el indicador de "graficable" (AppBar)
+    _maybeUpdateGraphable();
+
+    _uiUpdateDebounce = Timer(_debounceDelay, () {
+      if (mounted) {
+        setState(() {});
+      }
+    });
+  }
+
+  // Cache del último estado para evitar setState innecesarios
+  bool _lastGraphable = false;
+
+  // Actualiza inmediatamente el estado del icono de graficar si cambia.
+  void _maybeUpdateGraphable() {
+    final current = _isGraphable(_getDisplayExpression());
+    if (current != _lastGraphable) {
+      _lastGraphable = current;
+      if (mounted) setState(() {});
+    }
+  }
+
+  // ÉPICO: Mostrar panel flotante de operadores rápidos
+  void _showQuickPanel() {
+    _quickOperatorsTimer?.cancel();
+    setState(() {
+      _showQuickOperators = true;
+    });
+
+    // Auto-ocultar después de 4 segundos
+    _quickOperatorsTimer = Timer(Duration(seconds: 4), () {
+      _hideQuickPanel();
+    });
+  }
+
+  // ÉPICO: Ocultar panel flotante de operadores rápidos
+  void _hideQuickPanel() {
+    _quickOperatorsTimer?.cancel();
+    if (_showQuickOperators) {
+      setState(() {
+        _showQuickOperators = false;
+      });
+    }
+  }
+
+  // 💰 SISTEMA DE ANUNCIOS INTELIGENTE NO INTRUSIVO
+  void _showSmartInterstitialAd() async {
+    // Solo mostrar si no estamos en modo de desarrollo
+    if (!AdHelper.disableAds) {
+      bool shown = await AdHelper.showInterstitial();
+      if (!shown) {
+        // Si no se pudo mostrar, pre-cargar para el próximo intento
+        AdHelper.preloadInterstitial();
+      }
+    }
+  }
+
+  // 🚪 MANEJO DE DOUBLE-BACK PARA SALIR
+
+  // 🎁 FUNCIONES PREMIUM CON ANUNCIOS DE RECOMPENSA
+  void _openPremiumFeature(
+      Widget Function() screenBuilder, String featureName) {
+    if (AdHelper.disableAds) {
+      // En desarrollo, acceso directo
+      Navigator.push(
+          context, MaterialPageRoute(builder: (context) => screenBuilder()));
+      return;
+    }
+
+    // Mostrar diálogo de anuncio de recompensa
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text('${AppText.premiumFeature}: $featureName'),
+          content: Text(AppText.watchAdMessage),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text(AppText.cancel),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                Navigator.pop(context);
+                bool shown = await AdHelper.showRewardedAd();
+                if (shown) {
+                  // Anuncio completado, abrir función
+                  Navigator.push(context,
+                      MaterialPageRoute(builder: (context) => screenBuilder()));
+                } else {
+                  // Si no hay anuncio disponible, dar acceso gratuito
+                  Navigator.push(context,
+                      MaterialPageRoute(builder: (context) => screenBuilder()));
+                }
+              },
+              child: Text(AppText.watchAd),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  // 🌟 FUNCIONES DE COMPARTIR Y CALIFICAR
+  Future<void> _launchPlayStore() async {
+    // TODO: Reemplazar con tu package name real cuando subas a Play Store
+    const playStoreUrl =
+        'https://play.google.com/store/apps/details?id=com.example.calculator_scientific';
+    final uri = Uri.parse(playStoreUrl);
+
+    try {
+      if (await canLaunchUrl(uri)) {
+        await launchUrl(uri, mode: LaunchMode.externalApplication);
+      } else {
+        // Fallback: mostrar mensaje para buscar manualmente
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(AppText.searchInPlayStoreToRate),
+              duration: Duration(seconds: 4),
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      print('Error al abrir Play Store: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(AppText.searchInPlayStore),
+            duration: Duration(seconds: 3),
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _shareApp() async {
+    final message = '''
+${AppText.discoverAdvancedCalculator}
+
+${AppText.mostCompleteScientificCalculator}
+${AppText.trigAndLogFunctions}
+${AppText.functionGraphs}
+${AppText.completeUnitConverter}
+${AppText.statisticsAndDataAnalysis}
+${AppText.educationalMathGames}
+${AppText.professionalAndModernInterface}
+
+📱 ${AppText.downloadFree}: https://play.google.com/store/apps/details?id=com.example.calculator_scientific
+
+#Calculator #Math #Science #Education #Android
+    ''';
+
+    try {
+      await Share.share(message);
+    } catch (e) {
+      print('Error al compartir: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(AppText.errorSharingApp)),
+        );
+      }
+    }
+  }
+
+  // OPTIMIZACIÓN: setState optimizado para no consumir frames
+  void _onButtonPressed(String buttonText) {
+    // Agrupamos todas las operaciones y solo hacemos setState al final
+    bool needsUpdate = false;
+
+    // ÉPICO: Detectar funciones científicas y fracciones para auto-mostrar panel flotante
+    List<String> scientificFunctions = [
+      'sin',
+      'cos',
+      'tan',
+      'ln',
+      'log',
+      '√',
+      'π',
+      'e',
+      'asin',
+      'acos',
+      'atan',
+      'sinh',
+      'cosh',
+      'tanh'
+    ];
+
+    // ÉPICO: También mostrar panel en modo fracciones cuando trabajas con fracciones
+    bool shouldShowPanel = scientificFunctions.contains(buttonText) ||
+        (_selectedMode == 4 &&
+            buttonText == 'a/b') || // Mostrar cuando inicias una fracción
+        (_selectedMode == 4 &&
+            _inFractionMode &&
+            ['↑', '↓', '→', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9']
+                .contains(buttonText));
+
+    if (shouldShowPanel) {
+      _showQuickPanel();
+    }
+
+    // LÓGICA SIMPLIFICADA: En modo fracciones, "/" always inicia una fracción
+    if (buttonText == '/' && _selectedMode == 4) {
+      print('🔍 DEBUG: Presionado "/", iniciando modo fracción');
+      _inFractionMode = true;
+
+      // Verificar si hay un número al final para usarlo como numerador
+      RegExp numberAtEnd = RegExp(r'(\d+(?:\.\d+)?)$');
+      Match? match = numberAtEnd.firstMatch(_expression);
+
+      if (match != null) {
+        _currentNumerator = match.group(1)!;
+        _expression = _expression.substring(
+            0, _expression.length - _currentNumerator.length);
+        print('🔢 USANDO NÚMERO ANTERIOR COMO NUMERADOR: $_currentNumerator');
+      } else {
+        _currentNumerator = '';
+        print('🔢 INICIANDO FRACCIÓN SIN NUMERADOR PREVIO');
+      }
+
+      _currentDenominator = '';
+      _editingDenominator = _currentNumerator
+          .isNotEmpty; // Si ya hay numerador, editar denominador
+      needsUpdate = true;
+
+      if (needsUpdate) {
+        _optimizedSetState();
+      }
+      return;
+    }
+
+    // Detectar operadores aritméticos
+    bool isArithmeticOperator =
+        ['+', '-', '*', '/', '^', '(', ')'].contains(buttonText);
+
+    // Si estamos en modo fracción y se presiona un operador o dígito (para nueva operación)
+    if (_inFractionMode &&
+        (isArithmeticOperator ||
+            (_currentNumerator.isNotEmpty &&
+                _currentDenominator.isNotEmpty &&
+                _isDigitOrDot(buttonText)))) {
+      // Completar la fracción automáticamente
+      if (_currentNumerator.isNotEmpty) {
+        String denom = _currentDenominator.isEmpty ? '1' : _currentDenominator;
+        _expression += '($_currentNumerator/$denom)';
+        _inFractionMode = false;
+        _currentNumerator = '';
+        _currentDenominator = '';
+        _editingDenominator = false;
+        needsUpdate = true;
+
+        // Continuar procesando el botón presionado
+        if (isArithmeticOperator) {
+          _expression += buttonText;
+          needsUpdate = true;
+        } else if (_isDigitOrDot(buttonText)) {
+          _expression += buttonText;
+          needsUpdate = true;
+        }
+
+        // OPTIMIZACIÓN: Solo un setState al final con debounce
+        if (needsUpdate) {
+          _optimizedSetState();
+        }
+        return; // Salir temprano después de procesar
+      }
+    }
+
+    // Manejo especial para modo de fracciones (cuando NO se autocompleta)
+    if (_inFractionMode && _isDigitOrDot(buttonText)) {
+      if (_editingDenominator) {
+        _currentDenominator += buttonText;
+        print('🔢 AGREGANDO AL DENOMINADOR: $_currentDenominator');
+      } else {
+        _currentNumerator += buttonText;
+        print('🔢 AGREGANDO AL NUMERADOR: $_currentNumerator');
+      }
+      needsUpdate = true;
+    } else if (buttonText == 'AC') {
+      _expression = '';
+      _result = '';
+      _inFractionMode = false;
+      _currentNumerator = '';
+      _currentDenominator = '';
+      _editingDenominator = false;
+      needsUpdate = true;
+    } else if (buttonText == '⌫') {
+      if (_inFractionMode) {
+        if (_editingDenominator && _currentDenominator.isNotEmpty) {
+          _currentDenominator =
+              _currentDenominator.substring(0, _currentDenominator.length - 1);
+        } else if (!_editingDenominator && _currentNumerator.isNotEmpty) {
+          _currentNumerator =
+              _currentNumerator.substring(0, _currentNumerator.length - 1);
+        }
+        needsUpdate = true;
+      } else if (_expression.isNotEmpty) {
+        _expression = _expression.substring(0, _expression.length - 1);
+        needsUpdate = true;
+      }
+    } else if (buttonText == 'a/b') {
+      // Iniciar modo fracción
+      _inFractionMode = true;
+      _currentNumerator = '';
+      _currentDenominator = '';
+      _editingDenominator = false;
+      needsUpdate = true;
+    } else if (buttonText == '↓') {
+      // Cambiar al denominador
+      if (_inFractionMode) {
+        _editingDenominator = true;
+        needsUpdate = true;
+      }
+    } else if (buttonText == '↑') {
+      // Cambiar al numerador
+      if (_inFractionMode) {
+        _editingDenominator = false;
+        needsUpdate = true;
+      }
+    } else if (buttonText == '→' && _inFractionMode) {
+      // Salir del modo fracción agregando la fracción actual a la expresión
+      if (_currentNumerator.isNotEmpty) {
+        String denominator =
+            _currentDenominator.isEmpty ? '1' : _currentDenominator;
+        String fractionString = 'FRACTION{$_currentNumerator/$denominator}';
+        _expression += fractionString;
+
+        // Limpiar estado de fracción
+        _currentNumerator = '';
+        _currentDenominator = '';
+        _editingDenominator = false;
+      }
+      _inFractionMode = false;
+      needsUpdate = true;
+    } else if (buttonText == '=') {
+      // Si estamos en modo fracción, completar la fracción antes de evaluar
+      if (_inFractionMode && _currentNumerator.isNotEmpty) {
+        String denominator =
+            _currentDenominator.isEmpty ? '1' : _currentDenominator;
+        String fractionString = 'FRACTION{$_currentNumerator/$denominator}';
+        _expression += fractionString;
+
+        // Debug: Mostrar que se completó la fracción
+        print(
+            '🔢 FRACCIÓN COMPLETADA: $_currentNumerator/$denominator -> expresión final: $_expression');
+
+        // Limpiar estado de fracción
+        _inFractionMode = false;
+        _currentNumerator = '';
+        _currentDenominator = '';
+        _editingDenominator = false;
+      }
+
+      try {
+        // Usar ExpressionEvaluator que respeta el orden de operaciones
+        _result = _expressionEvaluator.evaluate(_expression);
+        _history.add('$_expression = $_result');
+        if (_history.length > 50) {
+          _history.removeAt(0);
+        }
+
+        // CRÍTICO: Limpiar la expresión para que se muestre el resultado
+        _expression = '';
+        print('🎯 RESULTADO CALCULADO: "$_result" - expresión limpiada');
+
+        // 💰 SISTEMA DE ANUNCIOS INTELIGENTE
+        _calculationCount++;
+        if (_calculationCount % _adFrequency == 0) {
+          _showSmartInterstitialAd();
+        }
+
+        needsUpdate = true;
+      } catch (e) {
+        _result = 'Error: ${e.toString()}';
+        _expression = ''; // También limpiar en caso de error
+        needsUpdate = true;
+      }
+    } else if (buttonText == 'SHIFT') {
+      _isShiftActive = !_isShiftActive;
+      if (_isShiftActive) _isAlphaActive = false; // Solo uno activo
+      needsUpdate = true;
+    } else if (buttonText == 'ALPHA') {
+      _isAlphaActive = !_isAlphaActive;
+      if (_isAlphaActive) _isShiftActive = false; // Solo uno activo
+      needsUpdate = true;
+    } else {
+      // Manejar operaciones de fracciones y constantes científicas
+      List<String> fractionOps = ['a/b', 'a b/c', 'd↔f', 'simp', 'gcd', 'lcm'];
+
+      // Manejar funciones matemáticas primero
+      if (_isMathFunction(buttonText)) {
+        String functionResult = _handleMathFunction(buttonText);
+        _expression += functionResult;
+        needsUpdate = true;
+      } else if (fractionOps.contains(buttonText)) {
+        String fractionResult = _handleFractionOperation(buttonText);
+        if (buttonText == 'd↔f') {
+          // Para conversión decimal-fracción, mostrar el resultado
+          _result = fractionResult;
+        } else if (buttonText == 'simp') {
+          // Para simplificar, reemplazar la expresión
+          _expression = fractionResult;
+        } else {
+          // Para otras operaciones, agregar a la expresión
+          _expression += fractionResult;
+        }
+        needsUpdate = true;
+      } else {
+        // Verificar si es una fracción predefinida (como 1/3, 1/2, etc.)
+        if (_isPredefinedFraction(buttonText)) {
+          _handlePredefinedFraction(buttonText);
+          needsUpdate = true;
+        } else {
+          // Manejar constantes científicas
+          String valueToAdd = _getConstantValue(buttonText);
+          _expression += valueToAdd;
+          needsUpdate = true;
+        }
+      }
+    }
+
+    // OPTIMIZACIÓN: Solo un setState al final con debounce
+    if (needsUpdate) {
+      _optimizedSetState();
+    }
+  }
+
+  // Obtener el valor de las constantes científicas
+  String _getConstantValue(String constantName) {
+    Map<String, String> constants = {
+      // Constantes matemáticas
+      'π': '3.141592653589793',
+      'e': '2.718281828459045',
+      'γ': '0.5772156649015329', // Constante de Euler-Mascheroni
+      'φ': '1.618033988749895', // Número áureo
+
+      // Constantes físicas
+      'c': '299792458', // Velocidad de la luz (m/s)
+      'h': '6.62607015e-34', // Constante de Planck (J⋅s)
+      'ħ': '1.054571817e-34', // Constante de Planck reducida
+      'G': '6.67430e-11', // Constante gravitacional (m³⋅kg⁻¹⋅s⁻²)
+      'NA': '6.02214076e23', // Número de Avogadro (mol⁻¹)
+      'k': '1.380649e-23', // Constante de Boltzmann (J⋅K⁻¹)
+      'σ': '5.670374419e-8', // Constante de Stefan-Boltzmann
+      'R': '8.314462618', // Constante de los gases (J⋅mol⁻¹⋅K⁻¹)
+      'F': '96485.33212', // Constante de Faraday (C⋅mol⁻¹)
+      'α': '7.2973525693e-3', // Constante de estructura fina
+
+      // Masas de partículas
+      'me': '9.1093837015e-31', // Masa del electrón (kg)
+      'mp': '1.67262192369e-27', // Masa del protón (kg)
+      'mn': '1.67492749804e-27', // Masa del neutrón (kg)
+      'amu': '1.66053906660e-27', // Unidad de masa atómica (kg)
+
+      // Cargas y constantes eléctricas
+      'e⁻': '1.602176634e-19', // Carga elemental (C)
+      'ε₀': '8.8541878128e-12', // Permitividad del vacío (F⋅m⁻¹)
+    };
+    return constants[constantName] ?? constantName;
+  }
+
+  // Verificar si es una fracción predefinida
+  bool _isPredefinedFraction(String buttonText) {
+    List<String> predefinedFractions = [
+      '1/2',
+      '1/3',
+      '2/3',
+      '1/4',
+      '3/4',
+      '1/5',
+      '1/6',
+      '1/7',
+      '1/8',
+      '1/9',
+      '1/10'
+    ];
+    return predefinedFractions.contains(buttonText);
+  }
+
+  // Manejar fracciones predefinidas activando modo fracción
+  void _handlePredefinedFraction(String fraction) {
+    List<String> parts = fraction.split('/');
+    if (parts.length == 2) {
+      _inFractionMode = true;
+      _currentNumerator = parts[0];
+      _currentDenominator = parts[1];
+      _editingDenominator = false; // Comenzar editando numerador
+    }
+  }
+
+  // Funciones para manejo de fracciones
+  String _decimalToFraction(double decimal) {
+    if (decimal == decimal.toInt()) {
+      return decimal.toInt().toString();
+    }
+
+    // Algoritmo para convertir decimal a fracción
+    int sign = decimal < 0 ? -1 : 1;
+    decimal = decimal.abs();
+
+    int wholeNumber = decimal.toInt();
+    double fractionalPart = decimal - wholeNumber;
+
+    if (fractionalPart == 0) {
+      return (sign * wholeNumber).toString();
+    }
+
+    // Encontrar la fracción más simple
+    int numerator = 1;
+    int denominator = 1;
+    double error = 1.0;
+
+    for (int d = 1; d <= 1000; d++) {
+      int n = (fractionalPart * d).round();
+      double currentError = (n / d - fractionalPart).abs();
+
+      if (currentError < error) {
+        error = currentError;
+        numerator = n;
+        denominator = d;
+
+        if (error < 0.0001) break; // Precisión suficiente
+      }
+    }
+
+    // Simplificar la fracción
+    int gcd = _gcd(numerator, denominator);
+    numerator ~/= gcd;
+    denominator ~/= gcd;
+
+    // Formatear resultado
+    if (wholeNumber == 0) {
+      return '${sign * numerator}/$denominator';
+    } else {
+      return '${sign * wholeNumber} ${numerator}/$denominator';
+    }
+  }
+
+  int _gcd(int a, int b) {
+    while (b != 0) {
+      int temp = b;
+      b = a % b;
+      a = temp;
+    }
+    return a;
+  }
+
+  String _handleFractionOperation(String operation) {
+    try {
+      switch (operation) {
+        case 'a/b':
+          // Insertar símbolo de fracción
+          return '/';
+        case 'a b/c':
+          // Crear fracción mixta (se maneja en la entrada)
+          return ' ';
+        case 'd↔f':
+          // Convertir entre decimal y fracción
+          if (_result.isNotEmpty && _result != 'Error') {
+            double value = double.parse(_result);
+            return _decimalToFraction(value);
+          }
+          return _result;
+        case 'simp':
+          // Simplificar fracción actual
+          if (_expression.contains('/')) {
+            // Extraer numerador y denominador
+            List<String> parts = _expression.split('/');
+            if (parts.length == 2) {
+              try {
+                int num = int.parse(parts[0].trim());
+                int den = int.parse(parts[1].trim());
+                int gcd = _gcd(num.abs(), den.abs());
+                return '${num ~/ gcd}/${den ~/ gcd}';
+              } catch (e) {
+                return _expression;
+              }
+            }
+          }
+          return _expression;
+        case 'gcd':
+          // Máximo común divisor (requiere dos números)
+          return 'gcd(';
+        case 'lcm':
+          // Mínimo común múltiplo (requiere dos números)
+          return 'lcm(';
+        default:
+          return operation;
+      }
+    } catch (e) {
+      return 'Error';
+    }
+  }
+
+  // Determinar si estamos en contexto de fracciones
+
+  // Determinar qué expresión mostrar en el display principal
+  String _getDisplayExpression() {
+    print(
+        '🖥️ DISPLAY DEBUG: _inFractionMode=$_inFractionMode, numerador="$_currentNumerator", denominador="$_currentDenominator", _editingDenominator=$_editingDenominator, _result="$_result", _expression="$_expression"');
+
+    // Si estamos en modo fracción, mostrar la fracción actual
+    if (_inFractionMode && _currentNumerator.isNotEmpty) {
+      String denominator =
+          _currentDenominator.isEmpty ? '1' : _currentDenominator;
+
+      // Formato directo para que SimpleFractionDisplay lo renderice como fracción visual
+      String display = '$_currentNumerator/$denominator';
+      print('🖥️ DISPLAY: Modo fracción activo, mostrando: "$display"');
+      return display;
+    }
+
+    // Si hay expresión en curso, procesarla para mostrar fracciones correctamente
+    if (_expression.isNotEmpty) {
+      String displayExpression = _processExpressionForDisplay(_expression);
+      print('🖥️ DISPLAY: Mostrando expresión en curso: "$displayExpression"');
+      return displayExpression;
+    }
+
+    // Si hay resultado, mostrarlo
+    if (_result.isNotEmpty) {
+      print('🖥️ DISPLAY: Mostrando resultado: "$_result"');
+      return _result;
+    }
+
+    // Si no hay nada, mostrar 0
+    print('🖥️ DISPLAY: Mostrando por defecto: "0"');
+    return '0';
+  }
+
+  // Determina si una expresión es graficable: contiene la variable 'x' (mayúscula o minúscula)
+  bool _isGraphable(String expr) {
+    if (expr.trim().isEmpty) return false;
+    // Normalizar: reemplazar símbolos comunes por notación de parser si aplica
+    final s =
+        expr.replaceAll('π', 'pi').replaceAll('×', '*').replaceAll('÷', '/');
+    // Si contiene la variable x (ej. sin(x), x^2, 3*x) consideramos graficable
+    final hasX = RegExp(r'[xX]').hasMatch(s);
+    return hasX;
+  }
+
+  // Procesar expresión para mostrar fracciones correctamente en el display
+  String _processExpressionForDisplay(String expression) {
+    // Convertir FRACTION{7/5} a formato que SimpleFractionDisplay puede mostrar
+
+    // Si la expresión contiene solo una fracción, mostrarla directamente
+    RegExp singleFractionPattern = RegExp(r'^FRACTION\{(\d+)/(\d+)\}$');
+    Match? singleMatch = singleFractionPattern.firstMatch(expression);
+    if (singleMatch != null) {
+      String result = '${singleMatch.group(1)}/${singleMatch.group(2)}';
+      print('🎨 PROCESANDO FRACCIÓN ÚNICA: $expression -> $result');
+      return result;
+    }
+
+    // Para expresiones complejas, reemplazar FRACTION{x/y} con formato visual
+    String processed = expression
+        .replaceAllMapped(RegExp(r'FRACTION\{(\d+)/(\d+)\}'), (match) {
+      String result = '${match.group(1)}/${match.group(2)}';
+      print('🎨 REEMPLAZANDO FRACCIÓN: ${match.group(0)} -> $result');
+      return result;
+    });
+
+    return processed;
+  }
+
+  // Verificar si un botón es una función matemática
+  bool _isMathFunction(String buttonText) {
+    List<String> mathFunctions = [
+      // Funciones trigonométricas
+      'sin', 'cos', 'tan', 'sin⁻¹', 'cos⁻¹', 'tan⁻¹',
+      // Funciones logarítmicas
+      'ln', 'log', 'log₂',
+      // Funciones de potencia y raíz
+      '√', '∛', 'x²', 'x³', 'xʸ', '10ˣ', 'eˣ',
+      // Funciones especiales
+      '!', 'abs', 'mod', 'nCr', 'nPr',
+      // Funciones hiperbólicas
+      'sinh', 'cosh', 'tanh', 'sinh⁻¹', 'cosh⁻¹', 'tanh⁻¹',
+    ];
+    return mathFunctions.contains(buttonText);
+  }
+
+  // Manejar funciones matemáticas
+  String _handleMathFunction(String function) {
+    switch (function) {
+      // Funciones trigonométricas
+      case 'sin':
+        return 'sin(';
+      case 'cos':
+        return 'cos(';
+      case 'tan':
+        return 'tan(';
+      case 'sin⁻¹':
+        return 'asin(';
+      case 'cos⁻¹':
+        return 'acos(';
+      case 'tan⁻¹':
+        return 'atan(';
+
+      // Funciones logarítmicas
+      case 'ln':
+        return 'ln(';
+      case 'log':
+        return 'log(';
+      case 'log₂':
+        return 'log2(';
+
+      // Funciones de raíz y potencia
+      case '√':
+        return 'sqrt(';
+      case '∛':
+        return 'cbrt(';
+      case 'x²':
+        return '^2';
+      case 'x³':
+        return '^3';
+      case 'xʸ':
+        return '^';
+      case '10ˣ':
+        return '10^(';
+      case 'eˣ':
+        return 'e^(';
+
+      // Funciones especiales
+      case '!':
+        return '!';
+      case 'abs':
+        return 'abs(';
+      case 'mod':
+        return '%';
+      case 'nCr':
+        return 'C(';
+      case 'nPr':
+        return 'P(';
+
+      // Funciones hiperbólicas
+      case 'sinh':
+        return 'sinh(';
+      case 'cosh':
+        return 'cosh(';
+      case 'tanh':
+        return 'tanh(';
+      case 'sinh⁻¹':
+        return 'asinh(';
+      case 'cosh⁻¹':
+        return 'acosh(';
+      case 'tanh⁻¹':
+        return 'atanh(';
+
+      default:
+        return function;
+    }
+  }
+
+  // 🎨 Widget de botón moderno con efectos visuales avanzados
+  Widget _buildSimpleButton({
+    required String text,
+    required VoidCallback onPressed,
+    Color? color,
+    Color? textColor,
+  }) {
+    // 🎯 Detectar tipos de botón para diseño personalizado
+    bool isNumber = RegExp(r'[0-9.]').hasMatch(text) && text.length == 1;
+    bool isMainOperator = ['+', '-', '×', '÷'].contains(text);
+    bool isSpecialAction = ['=', 'C', 'CE', '⌫', 'AC'].contains(text);
+    bool isFunction = !isNumber && !isMainOperator && !isSpecialAction;
+
+    // 🎨 Colores premium glass/neón
+    Color buttonColor = color ??
+        _getButtonColor(text, isNumber, isMainOperator, isSpecialAction);
+    Color buttonTextColor = textColor ??
+        _getButtonTextColor(text, isNumber, isMainOperator, isSpecialAction);
+
+    // Efecto glassmorphism + neón
+    return AnimatedContainer(
+      duration: Duration(milliseconds: 180),
+      curve: Curves.easeInOutCubic,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(18),
+          onTap: onPressed,
+          splashColor: Colors.cyanAccent.withOpacity(0.18),
+          highlightColor: Colors.white.withOpacity(0.08),
+          child: AnimatedContainer(
+            duration: Duration(milliseconds: 180),
+            curve: Curves.easeInOutCubic,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(
+                color: isSpecialAction
+                    ? Colors.orangeAccent.withOpacity(0.5)
+                    : isMainOperator
+                        ? Colors.cyanAccent.withOpacity(0.4)
+                        : Colors.white.withOpacity(0.08),
+                width: isSpecialAction ? 2.2 : 1.2,
+              ),
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  buttonColor.withOpacity(0.85),
+                  buttonColor.withOpacity(0.65),
+                  Colors.white.withOpacity(0.07),
+                ],
+                stops: [0.0, 0.7, 1.0],
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: isSpecialAction
+                      ? Colors.orangeAccent.withOpacity(0.18)
+                      : isMainOperator
+                          ? Colors.cyanAccent.withOpacity(0.13)
+                          : Colors.black.withOpacity(0.10),
+                  blurRadius: isSpecialAction ? 18 : 10,
+                  offset: Offset(0, 4),
+                  spreadRadius: 1,
+                ),
+              ],
+            ),
+            padding: EdgeInsets.symmetric(
+              vertical:
+                  (isNumber || isMainOperator || isSpecialAction) ? 22 : 14,
+              horizontal: (isNumber || isMainOperator) ? 28 : 18,
+            ),
+            child: Center(
+              child: AnimatedDefaultTextStyle(
+                duration: Duration(milliseconds: 180),
+                curve: Curves.easeInOutCubic,
+                style: TextStyle(
+                  fontSize: _getButtonFontSize(text, isNumber, isMainOperator,
+                      isSpecialAction, isFunction),
+                  fontWeight: _getButtonFontWeight(
+                      text, isNumber, isMainOperator, isSpecialAction),
+                  color: buttonTextColor,
+                  letterSpacing: 0.7,
+                  shadows: [
+                    Shadow(
+                      color: isSpecialAction
+                          ? Colors.orangeAccent.withOpacity(0.7)
+                          : isMainOperator
+                              ? Colors.cyanAccent.withOpacity(0.7)
+                              : Colors.black.withOpacity(0.3),
+                      blurRadius: isSpecialAction ? 8 : 4,
+                      offset: Offset(0, 2),
+                    ),
+                  ],
+                ),
+                child: Text(text),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // 🎨 Métodos auxiliares para el diseño de botones
+
+  Color _getButtonColor(
+      String text, bool isNumber, bool isMainOperator, bool isSpecialAction) {
+    if (text == '=') return Colors.orange[600] ?? Colors.orange;
+    if (text == 'C' || text == 'CE') return Colors.red[600] ?? Colors.red;
+    if (text == '⌫') return Colors.red[500] ?? Colors.red;
+    if (isMainOperator) return Colors.blue[600] ?? Colors.blue;
+    if (isNumber) return Colors.grey[700] ?? Colors.grey;
+    return Colors.grey[600] ?? Colors.grey; // Funciones
+  }
+
+  Color _getButtonTextColor(
+      String text, bool isNumber, bool isMainOperator, bool isSpecialAction) {
+    return Colors.white;
+  }
+
+  double _getButtonFontSize(String text, bool isNumber, bool isMainOperator,
+      bool isSpecialAction, bool isFunction) {
+    if (isNumber) return 32;
+    if (isMainOperator || isSpecialAction) return 28;
+    if (isFunction) return 16;
+    return 20;
+  }
+
+  FontWeight _getButtonFontWeight(
+      String text, bool isNumber, bool isMainOperator, bool isSpecialAction) {
+    if (isNumber || isMainOperator) return FontWeight.w600;
+    if (isSpecialAction) return FontWeight.w700;
+    return FontWeight.w500;
+  }
+
+  // ÉPICO: Widget de botón mediano para secciones trigonométricas, avanzadas y fracciones
+  Widget _buildMediumButton({
+    required String text,
+    required VoidCallback onPressed,
+    Color? color,
+    Color? textColor,
+  }) {
+    // Efecto glassmorphism + neón para botones medianos
+    return AnimatedContainer(
+      duration: Duration(milliseconds: 180),
+      curve: Curves.easeInOutCubic,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(14),
+          onTap: onPressed,
+          splashColor: Colors.cyanAccent.withOpacity(0.15),
+          highlightColor: Colors.white.withOpacity(0.07),
+          child: AnimatedContainer(
+            duration: Duration(milliseconds: 180),
+            curve: Curves.easeInOutCubic,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(
+                color: (color ?? Colors.cyanAccent).withOpacity(0.4),
+                width: 1.6,
+              ),
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  (color ?? Colors.cyanAccent).withOpacity(0.80),
+                  (color ?? Colors.cyanAccent).withOpacity(0.55),
+                  Colors.white.withOpacity(0.06),
+                ],
+                stops: [0.0, 0.7, 1.0],
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: (color ?? Colors.cyanAccent).withOpacity(0.13),
+                  blurRadius: 12,
+                  offset: Offset(0, 4),
+                  spreadRadius: 1,
+                ),
+              ],
+            ),
+            padding: EdgeInsets.symmetric(vertical: 16, horizontal: 18),
+            child: Center(
+              child: AnimatedDefaultTextStyle(
+                duration: Duration(milliseconds: 180),
+                curve: Curves.easeInOutCubic,
+                style: TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                  color: textColor ?? Colors.white,
+                  letterSpacing: 0.7,
+                  shadows: [
+                    Shadow(
+                      color: (color ?? Colors.cyanAccent).withOpacity(0.6),
+                      blurRadius: 6,
+                      offset: Offset(0, 2),
+                    ),
+                  ],
+                ),
+                child: Text(text),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildToggleButton(String text, bool isActive, Color activeColor) {
+    return _buildSimpleButton(
+      text: text,
+      onPressed: () {
+        // OPTIMIZACIÓN: Evitamos setState anidado - con debounce
+        if (text == 'SHIFT') {
+          _isShiftActive = !_isShiftActive;
+          if (_isShiftActive) _isAlphaActive = false; // Solo uno activo
+        } else if (text == 'ALPHA') {
+          _isAlphaActive = !_isAlphaActive;
+          if (_isAlphaActive) _isShiftActive = false; // Solo uno activo
+        }
+        _optimizedSetState();
+      },
+      color: isActive ? activeColor : Colors.grey[400],
+      textColor: isActive ? Colors.white : Colors.black87,
+    );
+  }
+
+  // ÉPICO: Construir botón de operador rápido para el panel flotante
+  Widget _buildQuickOperatorButton(String operator) {
+    return AnimatedContainer(
+      duration: Duration(milliseconds: 180),
+      width: 54,
+      height: 54,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        gradient: LinearGradient(
+          colors: [
+            Colors.cyanAccent.withOpacity(0.85),
+            Colors.blueAccent.withOpacity(0.65),
+            Colors.white.withOpacity(0.08),
+          ],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.cyanAccent.withOpacity(0.25),
+            blurRadius: 16,
+            offset: Offset(0, 4),
+          ),
+        ],
+        border: Border.all(
+          color: Colors.cyanAccent.withOpacity(0.5),
+          width: 2.2,
+        ),
+      ),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(32),
+          onTap: () {
+            _onButtonPressed(operator);
+            _hideQuickPanel();
+          },
+          splashColor: Colors.cyanAccent.withOpacity(0.18),
+          highlightColor: Colors.white.withOpacity(0.08),
+          child: Center(
+            child: AnimatedDefaultTextStyle(
+              duration: Duration(milliseconds: 180),
+              curve: Curves.easeInOutCubic,
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 26,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 1.2,
+                shadows: [
+                  Shadow(
+                    color: Colors.cyanAccent.withOpacity(0.7),
+                    blurRadius: 8,
+                    offset: Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: Text(operator),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _getButtonLayout() {
+    switch (_selectedMode) {
+      case 1: // Trigonométrico
+        return Column(
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: _buildToggleButton(
+                      'SHIFT', _isShiftActive, Colors.red[600]!),
+                ),
+                SizedBox(width: 8),
+                Expanded(
+                  child: _buildToggleButton(
+                      'ALPHA', _isAlphaActive, Colors.green[600]!),
+                ),
+                SizedBox(width: 8),
+                Expanded(
+                  child: _buildSimpleButton(
+                    text: _angleMode,
+                    onPressed: () {
+                      // Cambiar modo de ángulo
+                      if (_angleMode == 'RAD') {
+                        _angleMode = 'DEG';
+                      } else if (_angleMode == 'DEG') {
+                        _angleMode = 'GRAD';
+                      } else {
+                        _angleMode = 'RAD';
+                      }
+                      _optimizedSetState();
+                    },
+                    color: Colors.blue[400],
+                    textColor: Colors.white,
+                  ),
+                ),
+              ],
+            ),
+            SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: _buildMediumButton(
+                    text: _isShiftActive ? 'sin⁻¹' : 'sin',
+                    onPressed: () =>
+                        _onButtonPressed(_isShiftActive ? 'asin' : 'sin'),
+                    color: Colors.orange[300],
+                    textColor: Colors.black87,
+                  ),
+                ),
+                SizedBox(width: 8),
+                Expanded(
+                  child: _buildMediumButton(
+                    text: _isShiftActive ? 'cos⁻¹' : 'cos',
+                    onPressed: () =>
+                        _onButtonPressed(_isShiftActive ? 'acos' : 'cos'),
+                    color: Colors.orange[300],
+                    textColor: Colors.black87,
+                  ),
+                ),
+                SizedBox(width: 8),
+                Expanded(
+                  child: _buildMediumButton(
+                    text: _isShiftActive ? 'tan⁻¹' : 'tan',
+                    onPressed: () =>
+                        _onButtonPressed(_isShiftActive ? 'atan' : 'tan'),
+                    color: Colors.orange[300],
+                    textColor: Colors.black87,
+                  ),
+                ),
+              ],
+            ),
+            SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: _buildMediumButton(
+                    text: _isShiftActive ? 'log' : 'ln',
+                    onPressed: () =>
+                        _onButtonPressed(_isShiftActive ? 'log' : 'ln'),
+                    color: Colors.purple[300],
+                    textColor: Colors.white,
+                  ),
+                ),
+                SizedBox(width: 8),
+                Expanded(
+                  child: _buildMediumButton(
+                    text: _isShiftActive ? '∛' : '√',
+                    onPressed: () =>
+                        _onButtonPressed(_isShiftActive ? '∛' : '√'),
+                    color: Colors.purple[300],
+                    textColor: Colors.white,
+                  ),
+                ),
+                SizedBox(width: 8),
+                Expanded(
+                  child: _buildMediumButton(
+                    text: _isShiftActive ? 'e' : 'π',
+                    onPressed: () =>
+                        _onButtonPressed(_isShiftActive ? 'e' : 'π'),
+                    color: Colors.indigo[400],
+                    textColor: Colors.white,
+                  ),
+                ),
+              ],
+            ),
+          ],
+        );
+
+      case 2: // Avanzado
+        return Column(
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: _buildMediumButton(
+                    text: _isShiftActive ? 'Γ' : '!',
+                    onPressed: () =>
+                        _onButtonPressed(_isShiftActive ? 'Γ' : '!'),
+                    color: Colors.teal[300],
+                    textColor: Colors.white,
+                  ),
+                ),
+                SizedBox(width: 8),
+                Expanded(
+                  child: _buildMediumButton(
+                    text: _isShiftActive ? 'gcd' : 'mod',
+                    onPressed: () =>
+                        _onButtonPressed(_isShiftActive ? 'gcd' : 'mod'),
+                    color: Colors.teal[300],
+                    textColor: Colors.white,
+                  ),
+                ),
+                SizedBox(width: 8),
+                Expanded(
+                  child: _buildMediumButton(
+                    text: _isShiftActive ? 'nPr' : 'nCr',
+                    onPressed: () =>
+                        _onButtonPressed(_isShiftActive ? 'nPr' : 'nCr'),
+                    color: Colors.teal[300],
+                    textColor: Colors.white,
+                  ),
+                ),
+              ],
+            ),
+            SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: _buildMediumButton(
+                    text: _isShiftActive ? '∑' : '∫',
+                    onPressed: () =>
+                        _onButtonPressed(_isShiftActive ? '∑' : '∫'),
+                    color: Colors.deepPurple[300],
+                    textColor: Colors.white,
+                  ),
+                ),
+                SizedBox(width: 8),
+                Expanded(
+                  child: _buildMediumButton(
+                    text: _isShiftActive ? '∆' : '∂',
+                    onPressed: () =>
+                        _onButtonPressed(_isShiftActive ? '∆' : '∂'),
+                    color: Colors.deepPurple[300],
+                    textColor: Colors.white,
+                  ),
+                ),
+                SizedBox(width: 8),
+                Expanded(
+                  child: _buildMediumButton(
+                    text: _isShiftActive ? '±' : '∞',
+                    onPressed: () =>
+                        _onButtonPressed(_isShiftActive ? '±' : '∞'),
+                    color: Colors.deepPurple[300],
+                    textColor: Colors.white,
+                  ),
+                ),
+              ],
+            ),
+            SizedBox(height: 8),
+            // Nueva fila de fracciones
+            Row(
+              children: [
+                Expanded(
+                  child: _buildMediumButton(
+                    text: _isShiftActive ? 'a b/c' : 'a/b',
+                    onPressed: () =>
+                        _onButtonPressed(_isShiftActive ? 'a b/c' : 'a/b'),
+                    color: Colors.pink[300],
+                    textColor: Colors.white,
+                  ),
+                ),
+                SizedBox(width: 8),
+                Expanded(
+                  child: _buildMediumButton(
+                    text: _isShiftActive ? 'simp' : 'd↔f',
+                    onPressed: () =>
+                        _onButtonPressed(_isShiftActive ? 'simp' : 'd↔f'),
+                    color: Colors.pink[300],
+                    textColor: Colors.white,
+                  ),
+                ),
+                SizedBox(width: 8),
+                Expanded(
+                  child: _buildMediumButton(
+                    text: _isShiftActive ? 'lcm' : 'gcd',
+                    onPressed: () =>
+                        _onButtonPressed(_isShiftActive ? 'lcm' : 'gcd'),
+                    color: Colors.pink[300],
+                    textColor: Colors.white,
+                  ),
+                ),
+              ],
+            ),
+          ],
+        );
+
+      case 3: // Constantes
+        List<List<String>> constantsGrid = [
+          ['π', 'e', 'γ'],
+          ['φ', 'c', 'h'],
+          ['G', 'NA', 'k'],
+          ['σ', 'R', 'F'],
+          ['me', 'mp', 'e⁻'],
+        ];
+
+        return Column(
+          children: constantsGrid.map((row) {
+            return Padding(
+              padding: EdgeInsets.only(bottom: 8),
+              child: Row(
+                children: row.map((constant) {
+                  return Expanded(
+                    child: Padding(
+                      padding:
+                          EdgeInsets.only(right: constant != row.last ? 8 : 0),
+                      child: _buildSimpleButton(
+                        text: constant,
+                        onPressed: () => _onButtonPressed(constant),
+                        color: Colors.amber[200],
+                        textColor: Colors.brown[800],
+                      ),
+                    ),
+                  );
+                }).toList(),
+              ),
+            );
+          }).toList(),
+        );
+
+      case 4: // Fracciones
+        return SingleChildScrollView(
+          child: Column(
+            children: [
+              // Primera fila: Inicio de fracción y navegación
+              Row(
+                children: [
+                  Expanded(
+                    child: _buildSimpleButton(
+                      text: 'a/b',
+                      onPressed: () => _onButtonPressed('a/b'),
+                      color: _inFractionMode
+                          ? Colors.green[600]
+                          : Colors.pink[400],
+                      textColor: Colors.white,
+                    ),
+                  ),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: _buildSimpleButton(
+                      text: '↑',
+                      onPressed: () => _onButtonPressed('↑'),
+                      color: !_editingDenominator && _inFractionMode
+                          ? Colors.blue[600]
+                          : Colors.grey[400],
+                      textColor: Colors.white,
+                    ),
+                  ),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: _buildSimpleButton(
+                      text: '↓',
+                      onPressed: () => _onButtonPressed('↓'),
+                      color: _editingDenominator && _inFractionMode
+                          ? Colors.blue[600]
+                          : Colors.grey[400],
+                      textColor: Colors.white,
+                    ),
+                  ),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: _buildSimpleButton(
+                      text: '→',
+                      onPressed: () => _onButtonPressed('→'),
+                      color: _inFractionMode
+                          ? Colors.green[500]
+                          : Colors.grey[400],
+                      textColor: Colors.white,
+                    ),
+                  ),
+                ],
+              ),
+              SizedBox(height: 6), // Reducido de 8 a 6
+              // Segunda fila: Números 7-9
+              Row(
+                children: [
+                  Expanded(
+                    child: _buildSimpleButton(
+                      text: '7',
+                      onPressed: () => _onButtonPressed('7'),
+                      color: Colors.grey[200],
+                      textColor: Colors.black87,
+                    ),
+                  ),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: _buildSimpleButton(
+                      text: '8',
+                      onPressed: () => _onButtonPressed('8'),
+                      color: Colors.grey[200],
+                      textColor: Colors.black87,
+                    ),
+                  ),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: _buildSimpleButton(
+                      text: '9',
+                      onPressed: () => _onButtonPressed('9'),
+                      color: Colors.grey[200],
+                      textColor: Colors.black87,
+                    ),
+                  ),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: _buildSimpleButton(
+                      text: 'd↔f',
+                      onPressed: () => _onButtonPressed('d↔f'),
+                      color: Colors.orange[400],
+                      textColor: Colors.white,
+                    ),
+                  ),
+                ],
+              ),
+              SizedBox(height: 6), // Reducido de 8 a 6
+              // Tercera fila: Números 4-6
+              Row(
+                children: [
+                  Expanded(
+                    child: _buildSimpleButton(
+                      text: '4',
+                      onPressed: () => _onButtonPressed('4'),
+                      color: Colors.grey[200],
+                      textColor: Colors.black87,
+                    ),
+                  ),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: _buildSimpleButton(
+                      text: '5',
+                      onPressed: () => _onButtonPressed('5'),
+                      color: Colors.grey[200],
+                      textColor: Colors.black87,
+                    ),
+                  ),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: _buildSimpleButton(
+                      text: '6',
+                      onPressed: () => _onButtonPressed('6'),
+                      color: Colors.grey[200],
+                      textColor: Colors.black87,
+                    ),
+                  ),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: _buildSimpleButton(
+                      text: 'simp',
+                      onPressed: () => _onButtonPressed('simp'),
+                      color: Colors.orange[400],
+                      textColor: Colors.white,
+                    ),
+                  ),
+                ],
+              ),
+              SizedBox(height: 8),
+              // Cuarta fila: Números 1-3
+              Row(
+                children: [
+                  Expanded(
+                    child: _buildSimpleButton(
+                      text: '1',
+                      onPressed: () => _onButtonPressed('1'),
+                      color: Colors.grey[200],
+                      textColor: Colors.black87,
+                    ),
+                  ),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: _buildSimpleButton(
+                      text: '2',
+                      onPressed: () => _onButtonPressed('2'),
+                      color: Colors.grey[200],
+                      textColor: Colors.black87,
+                    ),
+                  ),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: _buildSimpleButton(
+                      text: '3',
+                      onPressed: () => _onButtonPressed('3'),
+                      color: Colors.grey[200],
+                      textColor: Colors.black87,
+                    ),
+                  ),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: _buildSimpleButton(
+                      text: 'gcd',
+                      onPressed: () => _onButtonPressed('gcd'),
+                      color: Colors.purple[400],
+                      textColor: Colors.white,
+                    ),
+                  ),
+                ],
+              ),
+              SizedBox(height: 8),
+              // Quinta fila: 0 y operadores
+              Row(
+                children: [
+                  Expanded(
+                    flex: 2,
+                    child: _buildSimpleButton(
+                      text: '0',
+                      onPressed: () => _onButtonPressed('0'),
+                      color: Colors.grey[200],
+                      textColor: Colors.black87,
+                    ),
+                  ),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: _buildSimpleButton(
+                      text: '.',
+                      onPressed: () => _onButtonPressed('.'),
+                      color: Colors.grey[200],
+                      textColor: Colors.black87,
+                    ),
+                  ),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: _buildSimpleButton(
+                      text: 'lcm',
+                      onPressed: () => _onButtonPressed('lcm'),
+                      color: Colors.purple[400],
+                      textColor: Colors.white,
+                    ),
+                  ),
+                ],
+              ),
+              SizedBox(height: 8),
+              // Tercera fila: Fracciones comunes
+              Row(
+                children: [
+                  Expanded(
+                    child: _buildSimpleButton(
+                      text: '1/2',
+                      onPressed: () => _onButtonPressed('1/2'),
+                      color: Colors.orange[300],
+                      textColor: Colors.black87,
+                    ),
+                  ),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: _buildSimpleButton(
+                      text: '1/3',
+                      onPressed: () => _onButtonPressed('1/3'),
+                      color: Colors.orange[300],
+                      textColor: Colors.black87,
+                    ),
+                  ),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: _buildSimpleButton(
+                      text: '2/3',
+                      onPressed: () => _onButtonPressed('2/3'),
+                      color: Colors.orange[300],
+                      textColor: Colors.black87,
+                    ),
+                  ),
+                ],
+              ),
+              SizedBox(height: 8),
+              // Cuarta fila: Más fracciones comunes
+              Row(
+                children: [
+                  Expanded(
+                    child: _buildSimpleButton(
+                      text: '1/4',
+                      onPressed: () => _onButtonPressed('1/4'),
+                      color: Colors.orange[300],
+                      textColor: Colors.black87,
+                    ),
+                  ),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: _buildSimpleButton(
+                      text: '3/4',
+                      onPressed: () => _onButtonPressed('3/4'),
+                      color: Colors.orange[300],
+                      textColor: Colors.black87,
+                    ),
+                  ),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: _buildSimpleButton(
+                      text: '1/5',
+                      onPressed: () => _onButtonPressed('1/5'),
+                      color: Colors.orange[300],
+                      textColor: Colors.black87,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        );
+
+      default: // Básico
+        return SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Primera fila: controles
+              Row(
+                children: [
+                  Expanded(
+                    child: _buildToggleButton(
+                        'SHIFT', _isShiftActive, Colors.red[600]!),
+                  ),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: _buildToggleButton(
+                        'ALPHA', _isAlphaActive, Colors.green[600]!),
+                  ),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: _buildSimpleButton(
+                      text: 'AC',
+                      onPressed: () => _onButtonPressed('AC'),
+                      color: Colors.red[400],
+                      textColor: Colors.white,
+                    ),
+                  ),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: _buildSimpleButton(
+                      text: '⌫',
+                      onPressed: () => _onButtonPressed('⌫'),
+                      color: Colors.orange[400],
+                      textColor: Colors.white,
+                    ),
+                  ),
+                ],
+              ),
+              SizedBox(
+                  height: 2), // Reducido de 4 a 2 para eliminar más espacio
+
+              // Filas numéricas (diseño original HiPER)
+              ...List.generate(4, (row) {
+                List<List<String>> numberGrid = [
+                  ['(', ')', '^', '/'],
+                  ['7', '8', '9', '*'],
+                  ['4', '5', '6', '-'],
+                  ['1', '2', '3', '+'],
+                ];
+
+                return Padding(
+                  padding: EdgeInsets.only(
+                      bottom: 2), // Reducido de 4 a 2 para eliminar más espacio
+                  child: Row(
+                    children: numberGrid[row].map((text) {
+                      Color? buttonColor;
+                      Color? textColor;
+
+                      if ('+-*/^'.contains(text)) {
+                        buttonColor = Colors.blue[400];
+                        textColor = Colors.white;
+                      } else if ('()'.contains(text)) {
+                        buttonColor = Colors.purple[300];
+                        textColor = Colors.white;
+                      } else {
+                        buttonColor = Colors.grey[200];
+                        textColor = Colors.black87;
+                      }
+
+                      return Expanded(
+                        child: Padding(
+                          padding: EdgeInsets.only(
+                              right: text != numberGrid[row].last
+                                  ? 1
+                                  : 0), // Reducido de 2 a 1 para eliminar aún más espacio
+                          child: _buildSimpleButton(
+                            text: text,
+                            onPressed: () => _onButtonPressed(text),
+                            color: buttonColor,
+                            textColor: textColor,
+                          ),
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                );
+              }),
+            ],
+          ),
+        );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Fondo glassmorphism + neón
+    return Container(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            Color(0xFF0f2027), // azul oscuro
+            Color(0xFF2c5364), // azul intermedio
+            Color(0xFF232526), // gris oscuro
+          ],
+        ),
+      ),
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        appBar: AppBar(
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          title: Row(
+            children: [
+              Container(
+                padding: EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(12),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.cyanAccent.withOpacity(0.5),
+                      blurRadius: 16,
+                      spreadRadius: 2,
+                    ),
+                  ],
+                  gradient: LinearGradient(
+                    colors: [
+                      Color(0xFF00c6ff),
+                      Color(0xFF0072ff),
+                    ],
+                  ),
+                ),
+                child: Icon(
+                  Icons.calculate_rounded,
+                  color: Colors.white,
+                  size: 28,
+                  shadows: [
+                    Shadow(
+                      color: Colors.cyanAccent.withOpacity(0.7),
+                      blurRadius: 8,
+                    ),
+                  ],
+                ),
+              ),
+              SizedBox(width: 14),
+              Flexible(
+                child: Text(
+                  'HiPER Calculator',
+                  style: TextStyle(
+                    fontSize: 24,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 1.2,
+                    color: Colors.white,
+                    shadows: [
+                      Shadow(
+                        color: Colors.cyanAccent.withOpacity(0.5),
+                        blurRadius: 8,
+                        offset: Offset(0, 2),
+                      ),
+                    ],
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                  maxLines: 1,
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            IconButton(
+              icon: Icon(Icons.history, color: Colors.cyanAccent),
+              onPressed: () {
+                showDialog(
+                  context: context,
+                  builder: (context) => AlertDialog(
+                    backgroundColor: Color(0xFF232526),
+                    title: Text(AppText.history,
+                        style: TextStyle(color: Colors.cyanAccent)),
+                    content: Container(
+                      width: double.maxFinite,
+                      child: ListView.builder(
+                        shrinkWrap: true,
+                        itemCount: _history.length,
+                        itemBuilder: (context, index) {
+                          return ListTile(
+                            title: Text(_history[index],
+                                style: TextStyle(color: Colors.white)),
+                            onTap: () {
+                              String expression =
+                                  _history[index].split(' = ')[0];
+                              _expression = expression;
+                              setState(() {});
+                              Navigator.pop(context);
+                            },
+                          );
+                        },
+                      ),
+                    ),
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.pop(context),
+                        child: Text(AppText.close,
+                            style: TextStyle(color: Colors.cyanAccent)),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+            if (_isGraphable(_getDisplayExpression()))
+              IconButton(
+                icon: Icon(Icons.show_chart, color: Colors.greenAccent),
+                tooltip: 'Graficar',
+                onPressed: () {
+                  final expr = _getDisplayExpression();
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) =>
+                          FunctionGraph(initialFunction: expr),
+                    ),
+                  ).then((result) {
+                    if (result is Map && result['y'] != null) {
+                      setState(() {
+                        _result = result['y'].toString();
+                      });
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                            content: Text(
+                                'Valor recibido del graficador: f(${result['x']?.toStringAsFixed(3)}) = ${result['y']?.toStringAsFixed(6)}')),
+                      );
+                    }
+                  });
+                },
+              ),
+          ],
+        ),
+        drawer: Drawer(
+          child: ListView(
+            padding: EdgeInsets.zero,
+            children: [
+              DrawerHeader(
+                decoration: BoxDecoration(
+                  color: Colors.blue[700],
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Advanced Calculator',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 24,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    SizedBox(height: 8),
+                    Text(
+                      'Calculadora Científica',
+                      style: TextStyle(
+                        color: Colors.white70,
+                        fontSize: 16,
+                      ),
+                    ),
+                    SizedBox(height: 8),
+                    Text(
+                      'Modo: ${_selectedMode == 0 ? "Básico" : _selectedMode == 1 ? "Trigonométrico" : _selectedMode == 2 ? "Avanzado" : _selectedMode == 3 ? "Constantes" : "Fracciones"}',
+                      style: TextStyle(
+                        color: Colors.white60,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+              // SECCIÓN: MODOS DE CALCULADORA
+              Padding(
+                padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                child: Text(AppText.modes,
+                    style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.grey[600])),
+              ),
+              ListTile(
+                leading: Icon(Icons.calculate, color: Colors.blue[700]),
+                title: Text(AppText.basic),
+                trailing: _selectedMode == 0
+                    ? Icon(Icons.check, color: Colors.green)
+                    : null,
+                onTap: () {
+                  Navigator.pop(context);
+                  setState(() {
+                    _selectedMode = 0;
+                  });
+                },
+              ),
+              ListTile(
+                leading: Icon(Icons.functions, color: Colors.orange[700]),
+                title: Text(AppText.trigonometric),
+                trailing: _selectedMode == 1
+                    ? Icon(Icons.check, color: Colors.green)
+                    : null,
+                onTap: () {
+                  Navigator.pop(context);
+                  setState(() {
+                    _selectedMode = 1;
+                  });
+                },
+              ),
+              ListTile(
+                leading: Icon(Icons.science, color: Colors.purple[700]),
+                title: Text(AppText.advanced),
+                trailing: _selectedMode == 2
+                    ? Icon(Icons.check, color: Colors.green)
+                    : null,
+                onTap: () {
+                  Navigator.pop(context);
+                  setState(() {
+                    _selectedMode = 2;
+                  });
+                },
+              ),
+              ListTile(
+                leading: Icon(Icons.code, color: Colors.indigo[700]),
+                title: Text(AppText.constants),
+                trailing: _selectedMode == 3
+                    ? Icon(Icons.check, color: Colors.green)
+                    : null,
+                onTap: () {
+                  Navigator.pop(context);
+                  setState(() {
+                    _selectedMode = 3;
+                  });
+                },
+              ),
+              ListTile(
+                leading: Icon(Icons.pie_chart, color: Colors.pink[700]),
+                title: Text(AppText.fractions),
+                trailing: _selectedMode == 4
+                    ? Icon(Icons.check, color: Colors.green)
+                    : null,
+                onTap: () {
+                  Navigator.pop(context);
+                  setState(() {
+                    _selectedMode = 4;
+                  });
+                },
+              ),
+
+              Divider(),
+
+              // SECCIÓN: FUNCIONES RÁPIDAS
+              Padding(
+                padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                child: Text('FUNCIONES RÁPIDAS',
+                    style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.grey[600])),
+              ),
+              ListTile(
+                leading: Icon(Icons.square_foot, color: Colors.green[700]),
+                title: Text(AppText.squareRoot),
+                subtitle: Text('√'),
+                onTap: () {
+                  Navigator.pop(context);
+                  _expression += '√(';
+                  _optimizedSetState();
+                },
+              ),
+              ListTile(
+                leading: Icon(Icons.change_circle, color: Colors.green[700]),
+                title: Text(AppText.pi),
+                subtitle: Text('3.14159...'),
+                onTap: () {
+                  Navigator.pop(context);
+                  _expression += 'π';
+                  setState(() {});
+                },
+              ),
+
+              // El acceso a graficar ahora está en el AppBar cuando la expresión es graficable.
+              ListTile(
+                leading: Icon(Icons.exposure, color: Colors.green[700]),
+                title: Text(AppText.numberE),
+                subtitle: Text('2.71828...'),
+                onTap: () {
+                  Navigator.pop(context);
+                  _expression += 'e';
+                  setState(() {});
+                },
+              ),
+              ListTile(
+                leading: Icon(Icons.swap_horiz, color: Colors.orange[700]),
+                title: Text(AppText.decimalToFraction),
+                subtitle: Text(AppText.convertBetweenFormats),
+                onTap: () {
+                  Navigator.pop(context);
+                  if (_result.isNotEmpty && _result != 'Error') {
+                    try {
+                      double value = double.parse(_result);
+                      String fractionResult = _decimalToFraction(value);
+                      _result = fractionResult;
+                      setState(() {});
+                    } catch (e) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text(AppText.cannotConvert)),
+                      );
+                    }
+                  }
+                },
+              ),
+
+              Divider(),
+
+              // SECCIÓN: CONFIGURACIÓN
+              Padding(
+                padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                child: Text('CONFIGURACIÓN',
+                    style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.grey[600])),
+              ),
+              ListTile(
+                leading: Icon(Icons.rotate_right, color: Colors.blue[700]),
+                title: Text('${AppText.angleMode}: $_angleMode'),
+                subtitle: Text('RAD / DEG / GRAD'),
+                onTap: () {
+                  Navigator.pop(context);
+                  setState(() {
+                    if (_angleMode == 'RAD') {
+                      _angleMode = 'DEG';
+                    } else if (_angleMode == 'DEG') {
+                      _angleMode = 'GRAD';
+                    } else {
+                      _angleMode = 'RAD';
+                    }
+                  });
+                },
+              ),
+              ListTile(
+                leading:
+                    Icon(Icons.format_list_numbered, color: Colors.blue[700]),
+                title: Text('${AppText.format}: $_numberFormat'),
+                subtitle: Text('NORMAL / SCI / ENG'),
+                onTap: () {
+                  Navigator.pop(context);
+                  setState(() {
+                    if (_numberFormat == 'NORMAL') {
+                      _numberFormat = 'SCI';
+                    } else if (_numberFormat == 'SCI') {
+                      _numberFormat = 'ENG';
+                    } else {
+                      _numberFormat = 'NORMAL';
+                    }
+                  });
+                },
+              ),
+
+              Divider(),
+
+              // SECCIÓN: MÓDULOS ADICIONALES
+              Padding(
+                padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                child: Text('MÓDULOS',
+                    style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.grey[600])),
+              ),
+              ListTile(
+                leading: Icon(Icons.bar_chart, color: Colors.green[700]),
+                title: Text(AppText.statistics),
+                subtitle: Text(AppText.dataAnalysis),
+                onTap: () {
+                  Navigator.pop(context);
+                  _openPremiumFeature(() => StatisticsScreen(), 'Estadística');
+                },
+              ),
+              ListTile(
+                leading: Icon(Icons.show_chart, color: Colors.blue[700]),
+                title: Text(AppText.functionGraph),
+                subtitle: Text(AppText.visualizeEquations),
+                onTap: () {
+                  Navigator.pop(context);
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (context) => FunctionGraph()),
+                  );
+                },
+              ),
+              ListTile(
+                leading:
+                    Icon(Icons.swap_horiz_rounded, color: Colors.orange[700]),
+                title: Text('Conversor de Unidades'),
+                subtitle: Text(AppText.measuresCurrenciesEtc),
+                onTap: () {
+                  Navigator.pop(context);
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                        builder: (context) => UnitConverterScreen()),
+                  );
+                },
+              ),
+              ListTile(
+                leading:
+                    Icon(Icons.currency_exchange, color: Colors.purple[700]),
+                title: Text('Intercambio de Divisas'),
+                subtitle: Text(AppText.currencyConversion),
+                onTap: () {
+                  Navigator.pop(context);
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (context) => ExchangeScreen()),
+                  );
+                },
+              ),
+
+              Divider(),
+
+              // SECCIÓN: JUEGOS MATEMÁTICOS
+              Padding(
+                padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                child: Text('JUEGOS',
+                    style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.grey[600])),
+              ),
+              ListTile(
+                leading: Icon(Icons.psychology, color: Colors.pink[700]),
+                title: Text('Juego de Adivinanza'),
+                subtitle: Text(AppText.guessTheNumber),
+                onTap: () {
+                  Navigator.pop(context);
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (context) => GameScreen()),
+                  );
+                },
+              ),
+              ListTile(
+                leading: Icon(Icons.rocket_launch, color: Colors.indigo[700]),
+                title: Text('Persecución Cósmica'),
+                subtitle: Text(AppText.solveEquations),
+                onTap: () {
+                  Navigator.pop(context);
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                        builder: (context) => CosmicEquationChase()),
+                  );
+                },
+              ),
+
+              Divider(),
+
+              // SECCIÓN: HERRAMIENTAS
+              Padding(
+                padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                child: Text('HERRAMIENTAS',
+                    style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.grey[600])),
+              ),
+              ListTile(
+                leading: Icon(Icons.help, color: Colors.blue[700]),
+                title: Text('Ayuda'),
+                subtitle: Text(AppText.howToUseCalculator),
+                onTap: () {
+                  Navigator.pop(context);
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (context) => HelpScreen()),
+                  );
+                },
+              ),
+              ListTile(
+                leading: Icon(Icons.feedback, color: Colors.green[700]),
+                title: Text('Sugerencias'),
+                subtitle: Text(AppText.sendFeedback),
+                onTap: () {
+                  Navigator.pop(context);
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                        builder: (context) => SuggestionsScreen()),
+                  );
+                },
+              ),
+              ListTile(
+                leading: Icon(Icons.star, color: Colors.orange[700]),
+                title: Text('Calificar App'),
+                subtitle: Text(AppText.rateUsOnPlayStore),
+                onTap: () {
+                  Navigator.pop(context);
+                  _launchPlayStore();
+                },
+              ),
+              ListTile(
+                leading: Icon(Icons.share, color: Colors.green[600]),
+                title: Text('Compartir App'),
+                subtitle: Text(AppText.recommendToFriends),
+                onTap: () {
+                  Navigator.pop(context);
+                  _shareApp();
+                },
+              ),
+              ListTile(
+                leading: Icon(Icons.history, color: Colors.blue[700]),
+                title: Text(AppText.history),
+                subtitle: Text('${_history.length} ${AppText.calculations}'),
+                onTap: () {
+                  Navigator.pop(context);
+                  showDialog(
+                    context: context,
+                    builder: (context) => AlertDialog(
+                      title: Text(AppText.history),
+                      content: Container(
+                        width: double.maxFinite,
+                        child: ListView.builder(
+                          shrinkWrap: true,
+                          itemCount: _history.length,
+                          itemBuilder: (context, index) {
+                            return ListTile(
+                              title: Text(_history[index]),
+                              onTap: () {
+                                String expression =
+                                    _history[index].split(' = ')[0];
+                                _expression = expression;
+                                setState(() {});
+                                Navigator.pop(context);
+                              },
+                            );
+                          },
+                        ),
+                      ),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.pop(context),
+                          child: Text(AppText.close),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+              ListTile(
+                leading: Icon(Icons.clear_all, color: Colors.red[700]),
+                title: Text(AppText.clearAll),
+                subtitle: Text(AppText.clearExpressionAndHistory),
+                onTap: () {
+                  Navigator.pop(context);
+                  setState(() {
+                    _expression = '';
+                    _result = '';
+                    _history.clear();
+                    _inFractionMode = false;
+                    _currentNumerator = '';
+                    _currentDenominator = '';
+                    _editingDenominator = false;
+                  });
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text(AppText.allCleared)),
+                  );
+                },
+              ),
+
+              Divider(),
+
+              ListTile(
+                leading: Icon(Icons.info, color: Colors.blue[700]),
+                title: Text(AppText.about),
+                subtitle: Text('${AppText.advancedCalculator} v1.0'),
+                onTap: () {
+                  Navigator.pop(context);
+                  showDialog(
+                    context: context,
+                    builder: (context) => AlertDialog(
+                      title: Text(AppText.advancedCalculator),
+                      content: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(AppText.scientificCalculator),
+                          SizedBox(height: 8),
+                          Text('${AppText.version} 2.0'),
+                          SizedBox(height: 8),
+                          Text(AppText.features),
+                          Text(AppText.basicOperations),
+                          Text(AppText.fractionHandling),
+                          Text(AppText.mathConstants),
+                          Text(AppText.trigFunctions),
+                          Text(AppText.calculationHistory),
+                          Text(AppText.inputModes),
+                        ],
+                      ),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.pop(context),
+                          child: Text(AppText.close),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ],
+          ),
+        ),
+        body: Stack(
+          children: [
+            Column(
+              children: [
+                // 🎨 Barra de indicadores de estado modernizada
+                Container(
+                  height: 40,
+                  width: double.infinity,
+                  padding: EdgeInsets.symmetric(horizontal: 20, vertical: 6),
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.centerLeft,
+                      end: Alignment.centerRight,
+                      colors: [
+                        Colors.grey[800] ?? Colors.grey,
+                        Colors.grey[750] ?? Colors.grey,
+                        Colors.grey[800] ?? Colors.grey,
+                      ],
+                    ),
+                    border: Border(
+                      bottom: BorderSide(
+                        color:
+                            (Colors.blue[400] ?? Colors.blue).withOpacity(0.3),
+                        width: 2,
+                      ),
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.2),
+                        blurRadius: 4,
+                        offset: Offset(0, 2),
+                      ),
+                    ],
+                  ),
+                  child: Row(
+                    children: [
+                      // 🎯 Indicador de modo de ángulo mejorado
+                      Container(
+                        padding:
+                            EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            colors: [
+                              Colors.blue[500] ?? Colors.blue,
+                              Colors.blue[700] ?? Colors.blue
+                            ],
+                          ),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: Colors.blue[300]!.withOpacity(0.3),
+                            width: 1,
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.blue[700]!.withOpacity(0.3),
+                              blurRadius: 4,
+                              offset: Offset(0, 2),
+                            ),
+                          ],
+                        ),
+                        child: Text(
+                          _angleMode,
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            letterSpacing: 0.5,
+                          ),
+                        ),
+                      ),
+                      SizedBox(width: 8),
+                      // 🔥 Indicador SHIFT mejorado
+                      if (_isShiftActive)
+                        Container(
+                          padding:
+                              EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              colors: [Colors.red[500]!, Colors.red[700]!],
+                            ),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: Colors.red[300]!.withOpacity(0.3),
+                              width: 1,
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.red[700]!.withOpacity(0.3),
+                                blurRadius: 4,
+                                offset: Offset(0, 2),
+                              ),
+                            ],
+                          ),
+                          child: Text(
+                            'SHIFT',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                              letterSpacing: 0.5,
+                            ),
+                          ),
+                        ),
+                      if (_isShiftActive) SizedBox(width: 12),
+                      // 🅰️ Indicador ALPHA mejorado
+                      if (_isAlphaActive)
+                        Container(
+                          padding:
+                              EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              colors: [Colors.green[500]!, Colors.green[700]!],
+                            ),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: Colors.green[300]!.withOpacity(0.3),
+                              width: 1,
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.green[700]!.withOpacity(0.3),
+                                blurRadius: 4,
+                                offset: Offset(0, 2),
+                              ),
+                            ],
+                          ),
+                          child: Text(
+                            'ALPHA',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      if (_isAlphaActive) SizedBox(width: 8),
+                      // Spacer para empujar el formato a la derecha
+                      Spacer(),
+                      // Indicador de formato de número (clickeable)
+                      GestureDetector(
+                        onTap: () {
+                          // Cambiar formato de número
+                          if (_numberFormat == 'NORMAL') {
+                            _numberFormat = 'SCI';
+                          } else if (_numberFormat == 'SCI') {
+                            _numberFormat = 'ENG';
+                          } else {
+                            _numberFormat = 'NORMAL';
+                          }
+                          setState(() {});
+                        },
+                        child: Container(
+                          padding:
+                              EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              colors: [
+                                Colors.purple[500]!,
+                                Colors.purple[700]!
+                              ],
+                            ),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: Colors.purple[300]!.withOpacity(0.3),
+                              width: 1,
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.purple[700]!.withOpacity(0.3),
+                                blurRadius: 4,
+                                offset: Offset(0, 2),
+                              ),
+                            ],
+                          ),
+                          child: Text(
+                            _numberFormat,
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                              letterSpacing: 0.5,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+
+                // Display principal mejorado (como calculadora real)
+                // Display glassmorphism + neón
+                Expanded(
+                  flex: 2,
+                  child: Container(
+                    width: double.infinity,
+                    margin: EdgeInsets.symmetric(vertical: 8, horizontal: 8),
+                    padding: EdgeInsets.all(18),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.08),
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(
+                        color: Colors.cyanAccent.withOpacity(0.25),
+                        width: 2.5,
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.cyanAccent.withOpacity(0.18),
+                          blurRadius: 24,
+                          offset: Offset(0, 8),
+                        ),
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.18),
+                          blurRadius: 8,
+                          offset: Offset(0, 2),
+                        ),
+                      ],
+                      gradient: LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [
+                          Colors.white.withOpacity(0.10),
+                          Colors.cyanAccent.withOpacity(0.08),
+                          Colors.blueAccent.withOpacity(0.10),
+                        ],
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        // Línea de estado superior
+                        Container(
+                          width: double.infinity,
+                          height: 22,
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              // Indicador de modo actual
+                              Text(
+                                'M${_selectedMode + 1}',
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  color: Colors.greenAccent,
+                                  fontWeight: FontWeight.bold,
+                                  letterSpacing: 1.2,
+                                  shadows: [
+                                    Shadow(
+                                      color:
+                                          Colors.greenAccent.withOpacity(0.3),
+                                      blurRadius: 4,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              // Indicadores de estado
+                              Row(
+                                children: [
+                                  if (_inFractionMode)
+                                    Text(
+                                      'FRAC',
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        color: Colors.orangeAccent,
+                                        fontWeight: FontWeight.bold,
+                                        letterSpacing: 1.1,
+                                        shadows: [
+                                          Shadow(
+                                            color: Colors.orangeAccent
+                                                .withOpacity(0.3),
+                                            blurRadius: 4,
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  SizedBox(width: 8),
+                                  Text(
+                                    _angleMode,
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: Colors.cyanAccent,
+                                      fontWeight: FontWeight.bold,
+                                      letterSpacing: 1.1,
+                                      shadows: [
+                                        Shadow(
+                                          color: Colors.cyanAccent
+                                              .withOpacity(0.3),
+                                          blurRadius: 4,
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  SizedBox(width: 8),
+                                  Text(
+                                    _numberFormat,
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: Colors.purpleAccent,
+                                      fontWeight: FontWeight.bold,
+                                      letterSpacing: 1.1,
+                                      shadows: [
+                                        Shadow(
+                                          color: Colors.purpleAccent
+                                              .withOpacity(0.3),
+                                          blurRadius: 4,
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                        // Display principal con efecto neón
+                        Expanded(
+                          flex: 5,
+                          child: Container(
+                            width: double.infinity,
+                            color: Colors.transparent,
+                            child: FittedBox(
+                              fit: BoxFit.contain,
+                              alignment: Alignment.bottomRight,
+                              child: Container(
+                                constraints: BoxConstraints(
+                                  minWidth:
+                                      MediaQuery.of(context).size.width * 0.98,
+                                  maxWidth:
+                                      MediaQuery.of(context).size.width * 0.98,
+                                ),
+                                padding: EdgeInsets.symmetric(
+                                    horizontal: 8, vertical: 8),
+                                child: _inFractionMode
+                                    ? _buildUnifiedFractionDisplay()
+                                    : _buildUnifiedDisplay(),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+
+                // Tabs de modo premium glassmorphism
+                Container(
+                  height: 44,
+                  margin: EdgeInsets.symmetric(vertical: 2, horizontal: 6),
+                  child: Row(
+                    children: [
+                      'Básico',
+                      'Trigonométrico',
+                      'Avanzado',
+                      'Constantes',
+                      'Fracciones'
+                    ].asMap().entries.map((entry) {
+                      int index = entry.key;
+                      String title = entry.value;
+                      bool isSelected = _selectedMode == index;
+
+                      return Expanded(
+                        child: GestureDetector(
+                          onTap: () => setState(() => _selectedMode = index),
+                          child: AnimatedContainer(
+                            duration: Duration(milliseconds: 180),
+                            curve: Curves.easeInOutCubic,
+                            margin: EdgeInsets.symmetric(horizontal: 2),
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                color: isSelected
+                                    ? Colors.cyanAccent.withOpacity(0.7)
+                                    : Colors.white.withOpacity(0.08),
+                                width: isSelected ? 2.2 : 1.2,
+                              ),
+                              gradient: LinearGradient(
+                                begin: Alignment.topLeft,
+                                end: Alignment.bottomRight,
+                                colors: isSelected
+                                    ? [
+                                        Colors.cyanAccent.withOpacity(0.25),
+                                        Colors.blueAccent.withOpacity(0.18),
+                                        Colors.white.withOpacity(0.08),
+                                      ]
+                                    : [
+                                        Colors.white.withOpacity(0.06),
+                                        Colors.grey.withOpacity(0.04),
+                                      ],
+                              ),
+                              boxShadow: isSelected
+                                  ? [
+                                      BoxShadow(
+                                        color:
+                                            Colors.cyanAccent.withOpacity(0.18),
+                                        blurRadius: 10,
+                                        offset: Offset(0, 2),
+                                      ),
+                                    ]
+                                  : [],
+                            ),
+                            child: Center(
+                              child: AnimatedDefaultTextStyle(
+                                duration: Duration(milliseconds: 180),
+                                curve: Curves.easeInOutCubic,
+                                style: TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.bold,
+                                  color: isSelected
+                                      ? Colors.cyanAccent
+                                      : Colors.white.withOpacity(0.7),
+                                  letterSpacing: 1.1,
+                                  shadows: isSelected
+                                      ? [
+                                          Shadow(
+                                            color: Colors.cyanAccent
+                                                .withOpacity(0.5),
+                                            blurRadius: 6,
+                                            offset: Offset(0, 2),
+                                          ),
+                                        ]
+                                      : [],
+                                ),
+                                child: Text(title),
+                              ),
+                            ),
+                          ),
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                ),
+
+                // Área de botones (layout optimizado)
+                Expanded(
+                  flex: 4,
+                  child: Container(
+                    padding: EdgeInsets.all(8), // Reducido de 12 a 8
+                    child: _getButtonLayout(),
+                  ),
+                ),
+
+                // Fila inferior con 0, punto y igual (altura reducida)
+                Container(
+                  padding: EdgeInsets.symmetric(
+                      horizontal: 8, vertical: 2), // Reducido de 4 a 2
+                  child: Row(
+                    children: [
+                      Expanded(
+                        flex: 2,
+                        child: _buildSimpleButton(
+                          text: '0',
+                          onPressed: () => _onButtonPressed('0'),
+                          color: Colors.grey[200],
+                          textColor: Colors.black87,
+                        ),
+                      ),
+                      SizedBox(
+                          width:
+                              1), // Reducido de 3 a 1 para eliminar más espacio
+                      Expanded(
+                        child: _buildSimpleButton(
+                          text: '.',
+                          onPressed: () => _onButtonPressed('.'),
+                          color: Colors.grey[200],
+                          textColor: Colors.black87,
+                        ),
+                      ),
+                      SizedBox(
+                          width:
+                              1), // Reducido de 3 a 1 para eliminar más espacio
+                      Expanded(
+                        flex: 2,
+                        child: _buildSimpleButton(
+                          text: '=',
+                          onPressed: () => _onButtonPressed('='),
+                          color: Colors.green[500],
+                          textColor: Colors.white,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            // ÉPICO: Panel flotante de operadores rápidos
+            if (_showQuickOperators)
+              Positioned(
+                bottom: 24,
+                left: 24,
+                right: 24,
+                child: Material(
+                  elevation: 8,
+                  borderRadius: BorderRadius.circular(16),
+                  color: Colors.grey[900]!.withOpacity(0.95),
+                  child: Container(
+                    padding: EdgeInsets.all(16),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              'Operadores Rápidos',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            GestureDetector(
+                              onTap: _hideQuickPanel,
+                              child: Icon(
+                                Icons.close,
+                                color: Colors.white70,
+                                size: 20,
+                              ),
+                            ),
+                          ],
+                        ),
+                        SizedBox(height: 12),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                          children: [
+                            _buildQuickOperatorButton('+'),
+                            _buildQuickOperatorButton('-'),
+                            _buildQuickOperatorButton('×'),
+                            _buildQuickOperatorButton('÷'),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // Método auxiliar para verificar si es dígito o punto
+  bool _isDigitOrDot(String text) {
+    return '0123456789.'.contains(text);
+  }
+
+  // Reemplazo básico de símbolos matemáticos
+  String _basicSymbolReplacement(String expr) {
+    return expr
+        .replaceAll('sqrt', '√')
+        .replaceAll('pi', 'π')
+        .replaceAll('*', '×')
+        .replaceAll('/', '÷')
+        .replaceAll('cbrt', '∛');
+  }
+
+  // 🎨 Widget de display unificado moderno
+  Widget _buildUnifiedDisplay() {
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        if (_expression.isNotEmpty)
+          Text(
+            _basicSymbolReplacement(_expression),
+            style: TextStyle(
+              fontSize: 20,
+              color: Colors.grey[400],
+              fontFamily: 'RobotoMono',
+              fontWeight: FontWeight.w400,
+              letterSpacing: 1.2,
+            ),
+            textAlign: TextAlign.right,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        // Resultado principal, grande y estático, adaptativo
+        Text(
+          _result == 'Error' ? 'Error' : _getDisplayExpression(),
+          style: TextStyle(
+            fontSize: _result == 'Error' ? 38 : 54,
+            color: _result == 'Error'
+                ? (Colors.red[400] ?? Colors.red)
+                : Colors.white,
+            fontFamily: 'RobotoMono',
+            fontWeight: FontWeight.bold,
+            letterSpacing: 2.0,
+            shadows: [
+              Shadow(
+                color: _result == 'Error'
+                    ? (Colors.red[700]?.withOpacity(0.3) ??
+                        Colors.red.withOpacity(0.3))
+                    : (Colors.blue[400]?.withOpacity(0.3) ??
+                        Colors.blue.withOpacity(0.3)),
+                blurRadius: 8,
+                offset: Offset(0, 2),
+              ),
+            ],
+          ),
+          textAlign: TextAlign.right,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+      ],
+    );
+  }
+
+  // Widget de display unificado para fracciones (mejorado)
+  Widget _buildUnifiedFractionDisplay() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        // **REVOLUCIÓN VISUAL**: Expresión anterior con renderizado matemático
+        if (_expression.isNotEmpty)
+          Container(
+            width: double.infinity,
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              reverse: true,
+              child: Text(
+                _basicSymbolReplacement(_expression),
+                style: TextStyle(
+                  fontSize: 16,
+                  color: Colors.grey[400],
+                  fontFamily: 'RobotoMono',
+                ),
+                textAlign: TextAlign.right,
+              ),
+            ),
+          ),
+
+        SizedBox(height: 8),
+
+        // Área principal con fracción actual
+        Expanded(
+          child: Row(
+            children: [
+              // Lado izquierdo: Fracción visual destacada
+              if (_inFractionMode)
+                Flexible(
+                  flex: 1,
+                  child: Container(
+                    padding: EdgeInsets.all(8), // Reducido de 16 a 8
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        // Numerador
+                        Container(
+                          padding: EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 2), // Reducido padding
+                          decoration: BoxDecoration(
+                            color: !_editingDenominator
+                                ? Colors.yellow[600]?.withOpacity(0.3)
+                                : Colors.transparent,
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(
+                            _currentNumerator.isEmpty ? '0' : _currentNumerator,
+                            style: TextStyle(
+                              fontSize: 20, // Reducido de 28 a 20
+                              color: !_editingDenominator
+                                  ? Colors.yellow[300]
+                                  : Colors.white70,
+                              fontFamily: 'RobotoMono',
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                        // Línea divisoria
+                        Container(
+                          height: 2, // Reducido de 3 a 2
+                          width: 40, // Reducido de 50 a 40
+                          margin: EdgeInsets.symmetric(
+                              vertical: 3), // Reducido de 4 a 3
+                          color: Colors.white,
+                        ),
+                        // Denominador
+                        Container(
+                          padding: EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 2), // Reducido padding
+                          decoration: BoxDecoration(
+                            color: _editingDenominator
+                                ? Colors.yellow[600]?.withOpacity(0.3)
+                                : Colors.transparent,
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(
+                            _currentDenominator.isEmpty
+                                ? '1'
+                                : _currentDenominator,
+                            style: TextStyle(
+                              fontSize: 20, // Reducido de 28 a 20
+                              color: _editingDenominator
+                                  ? Colors.yellow[300]
+                                  : Colors.white70,
+                              fontFamily: 'RobotoMono',
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+
+              SizedBox(width: 8), // Reducido de 16 a 8
+
+              // Lado derecho: Resultado decimal
+              Expanded(
+                flex: 2,
+                child: Container(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      if (_currentNumerator.isNotEmpty)
+                        Text(
+                          'Decimal:',
+                          style: TextStyle(
+                            fontSize: 12, // Reducido de 14 a 12
+                            color: Colors.grey[400],
+                            fontFamily: 'RobotoMono',
+                          ),
+                        ),
+                      if (_currentNumerator.isNotEmpty)
+                        SizedBox(height: 2), // Reducido de 4 a 2
+                      if (_currentNumerator.isNotEmpty)
+                        Text(
+                          _calculateFractionDecimal(),
+                          style: TextStyle(
+                            fontSize: 18, // Reducido de 24 a 18
+                            color: Colors.white,
+                            fontFamily: 'RobotoMono',
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  // Calcular valor decimal de la fracción actual
+  String _calculateFractionDecimal() {
+    try {
+      if (_currentNumerator.isEmpty) return '0';
+
+      double numerator = double.parse(_currentNumerator);
+      double denominator =
+          _currentDenominator.isEmpty ? 1 : double.parse(_currentDenominator);
+
+      if (denominator == 0) return 'Error';
+
+      double result = numerator / denominator;
+
+      // Formatear resultado
+      if (result == result.toInt()) {
+        return result.toInt().toString();
+      } else {
+        return result
+            .toStringAsFixed(6)
+            .replaceAll(RegExp(r'0+$'), '')
+            .replaceAll(RegExp(r'\.$'), '');
+      }
+    } catch (e) {
+      return 'Error';
+    }
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "app_title": "Advanced Calculator",
+  "calculator_title": "Scientific Calculator",
+  
+  "basic_mode": "Basic",
+  "trigonometric_mode": "Trigonometric",
+  "advanced_mode": "Advanced", 
+  "constants_mode": "Constants",
+  "fractions_mode": "Fractions",
+  
+  "whats_the_result": "What's the result?",
+  "your_answer": "Your answer",
+  "verify": "Verify",
+  "introduce_answer": "Enter an answer",
+  "invalid_answer": "Invalid answer",
+  "math_game": "Math Game",
+  
+  "statistics": "Statistics",
+  "no_data_to_save": "No data to save",
+  "dataset_saved": "Dataset saved",
+  "could_not_save": "Could not save",
+  "saved_datasets": "Saved datasets",
+  "no_saved_datasets": "No saved datasets",
+  "close": "Close",
+  "history_deleted": "History deleted",
+  "delete_all": "Delete all",
+  "error_sharing": "Error sharing",
+  
+  "help_and_support": "Help and Support",
+  "send_suggestions": "Send Suggestions",
+  "share_your_ideas": "Share your ideas to improve the app",
+  "report_problem": "Report Problem",
+  "help_us_improve": "Help us improve by reporting bugs",
+  "rate_app": "Rate App",
+  "share_app": "Share App",
+  
+  "game_over": "Game Over",
+  "score": "Score",
+  "restart": "Restart",
+  "exit": "Exit",
+  
+  "email_suggestion_sent": "✅ Your email app was opened to send the suggestion",
+  "send_suggestion": "📧 Send Suggestion",
+  "share": "📱 Share",
+  
+  "premium_feature": "🎁 Premium Feature",
+  "watch_ad_message": "To access this advanced feature, watch a short reward ad.\n\nIt's free and helps us maintain the app!",
+  "cancel": "Cancel",
+  "watch_ad": "Watch ad 📺",
+  
+  "category": "1. Category",
+  "use_decimal_point": "Use dot (.) for decimals",
+  "from_unit": "From",
+  "to_unit": "To",
+  
+  "pie": "Pie",
+  "bar": "Bar",
+  
+  "ads_disabled": "Ads disabled"
+}

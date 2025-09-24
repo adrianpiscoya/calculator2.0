@@ -1,0 +1,136 @@
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import 'package:flutter/services.dart';
+import '../services/calculator_service.dart';
+
+class HistoryDrawer extends StatelessWidget {
+  const HistoryDrawer({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return Drawer(
+      child: Column(
+        children: [
+          DrawerHeader(
+            decoration: BoxDecoration(
+              color: theme.colorScheme.primaryContainer,
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.history,
+                  color: theme.colorScheme.onPrimaryContainer,
+                  size: 32,
+                ),
+                const SizedBox(width: 16),
+                Text(
+                  'Historial',
+                  style: TextStyle(
+                    color: theme.colorScheme.onPrimaryContainer,
+                    fontSize: 24,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: Consumer<CalculatorService>(
+              builder: (context, calculatorService, _) {
+                final history = calculatorService.history;
+                if (history.isEmpty) {
+                  return Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          Icons.history_outlined,
+                          size: 64,
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                        const SizedBox(height: 16),
+                        Text(
+                          'No hay cálculos en el historial',
+                          style: TextStyle(
+                            color: theme.colorScheme.onSurfaceVariant,
+                            fontSize: 16,
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }
+
+                return ListView.builder(
+                  itemCount: history.length,
+                  reverse: true,
+                  itemBuilder: (context, index) {
+                    final reversedIndex = history.length - 1 - index;
+                    final entry = history[reversedIndex];
+
+                    return Card(
+                      margin: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 4,
+                      ),
+                      child: ListTile(
+                        title: Text(
+                          entry,
+                          style: const TextStyle(
+                            fontFamily: 'monospace',
+                            fontSize: 14,
+                          ),
+                        ),
+                        onTap: () {
+                          Clipboard.setData(ClipboardData(text: entry));
+                          Navigator.pop(context);
+                          ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                  content: Text('Copiado al portapapeles')));
+                        },
+                        trailing: Icon(
+                          Icons.replay,
+                          color: theme.colorScheme.primary,
+                        ),
+                      ),
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+          Container(
+            padding: const EdgeInsets.all(16),
+            child: Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: () async {
+                      final service = Provider.of<CalculatorService>(context,
+                          listen: false);
+                      if (service.history.isNotEmpty) {
+                        await service.clearHistory();
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Historial borrado')),
+                        );
+                        Navigator.pop(context);
+                      }
+                    },
+                    icon: const Icon(Icons.clear_all),
+                    label: const Text('Borrar historial'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: theme.colorScheme.errorContainer,
+                      foregroundColor: theme.colorScheme.onErrorContainer,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}

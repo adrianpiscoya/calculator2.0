@@ -1,0 +1,316 @@
+﻿import 'package:flutter/material.dart';
+import 'dart:async';
+import 'dart:math';
+
+class BunnyMiniGame extends StatefulWidget {
+  const BunnyMiniGame({super.key});
+  @override
+  State<BunnyMiniGame> createState() => _BunnyMiniGameState();
+}
+
+class _BunnyMiniGameState extends State<BunnyMiniGame> {
+  // Constantes de juego
+  static const int gameDuration = 30;
+  static const int bunnyHideTime = 1000; // ms que el bunny está oculto
+
+  // Gradiente constante para evitar recalculaciones
+  static const BoxDecoration gameBackground = BoxDecoration(
+    gradient: LinearGradient(
+      begin: Alignment.topCenter,
+      end: Alignment.bottomCenter,
+      colors: [
+        Color(0xFFE1F5FE),
+        Color(0xFFE8F5E8)
+      ], // lightBlue.shade100, lightGreen.shade100
+    ),
+  );
+
+  bool gameStarted = false;
+  bool bunnyVisible = false;
+  bool gameEnded = false;
+  int score = 0;
+  int timeLeft = gameDuration;
+  double bunnyX = 0.5;
+  double bunnyY = 0.5;
+
+  Timer? gameTimer;
+  Timer? bunnyTimer;
+  Timer? hideTimer;
+
+  @override
+  void dispose() {
+    gameTimer?.cancel();
+    bunnyTimer?.cancel();
+    hideTimer?.cancel(); // OPTIMIZACIÓN: Cancelar timer de esconder
+    super.dispose();
+  }
+
+  void startGame() {
+    setState(() {
+      score = 0;
+      timeLeft = 30;
+      gameStarted = true;
+      gameEnded = false;
+      bunnyVisible = false;
+    });
+
+    // Timer del juego
+    gameTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      setState(() {
+        timeLeft--;
+        if (timeLeft <= 0) {
+          endGame();
+        }
+      });
+    });
+
+    // Timer para mover el bunny
+    moveBunny();
+  }
+
+  void moveBunny() {
+    if (!gameStarted || gameEnded) return;
+
+    bunnyTimer = Timer.periodic(const Duration(milliseconds: 1500), (timer) {
+      if (!gameStarted || gameEnded) {
+        timer.cancel();
+        return;
+      }
+
+      setState(() {
+        // Nueva posición aleatoria
+        final random = Random();
+        bunnyX = 0.1 + random.nextDouble() * 0.7; // Entre 0.1 y 0.8
+        bunnyY = 0.2 + random.nextDouble() * 0.6; // Entre 0.2 y 0.8
+        bunnyVisible = true;
+      });
+
+      // OPTIMIZACIÓN: Cancelar timer anterior antes de crear uno nuevo
+      hideTimer?.cancel();
+      hideTimer = Timer(Duration(milliseconds: bunnyHideTime), () {
+        if (mounted && gameStarted && !gameEnded) {
+          setState(() {
+            bunnyVisible = false;
+          });
+        }
+      });
+    });
+  }
+
+  void catchBunny() {
+    if (!bunnyVisible) return;
+
+    setState(() {
+      score++;
+      bunnyVisible = false;
+    });
+
+    // OPTIMIZACIÓN: Limpiar SnackBars anteriores antes de mostrar uno nuevo
+    ScaffoldMessenger.of(context).clearSnackBars();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('¡Atrapaste al bunny! +1 punto'),
+        duration: Duration(milliseconds: 500),
+        backgroundColor: Colors.green,
+      ),
+    );
+  }
+
+  void endGame() {
+    setState(() {
+      gameEnded = true;
+      gameStarted = false;
+      bunnyVisible = false;
+    });
+
+    // OPTIMIZACIÓN: Cancelar todos los timers para evitar memory leaks
+    gameTimer?.cancel();
+    bunnyTimer?.cancel();
+    hideTimer?.cancel();
+
+    // Mostrar resultado final
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('¡Juego Terminado!'),
+        content: Text('Puntuación final: $score bunnies atrapados'),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.of(context).pop();
+              startGame(); // Reiniciar
+            },
+            child: Text('Jugar de nuevo'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.of(context).pop();
+              Navigator.of(context).pop(score);
+            },
+            child: Text('Salir'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final primary = Theme.of(context).colorScheme.primary;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('🐰 Atrapa al Bunny',
+            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+        backgroundColor: primary,
+        elevation: 0,
+      ),
+      body: Container(
+        width: double.infinity,
+        height: double.infinity,
+        decoration: gameBackground,
+        child: gameStarted ? _buildGameArea() : _buildStartScreen(),
+      ),
+    );
+  }
+
+  Widget _buildStartScreen() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const Text('🐰', style: TextStyle(fontSize: 80)),
+          const SizedBox(height: 20),
+          const Text(
+            '¡Atrapa al Bunny!',
+            style: TextStyle(
+                fontSize: 28, fontWeight: FontWeight.bold, color: Colors.brown),
+          ),
+          const SizedBox(height: 10),
+          Text(
+            'Tienes 30 segundos para atrapar todos los bunnies que puedas',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 16, color: Colors.grey.shade700),
+          ),
+          const SizedBox(height: 30),
+          ElevatedButton(
+            onPressed: startGame,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Theme.of(context).colorScheme.primary,
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 15),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(25)),
+            ),
+            child:
+                const Text('¡Comenzar Juego!', style: TextStyle(fontSize: 18)),
+          ),
+          if (score > 0) ...[
+            const SizedBox(height: 20),
+            Text('Mejor puntuación: $score',
+                style: TextStyle(fontSize: 16, color: Colors.orange.shade700)),
+          ]
+        ],
+      ),
+    );
+  }
+
+  Widget _buildGameArea() {
+    return Stack(
+      children: [
+        // Información del juego
+        Positioned(
+          top: 20,
+          left: 20,
+          right: 20,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(20),
+                  boxShadow: const [
+                    BoxShadow(color: Colors.black26, blurRadius: 4)
+                  ],
+                ),
+                child: Text(
+                  'Puntos: $score',
+                  style: const TextStyle(
+                      fontSize: 18, fontWeight: FontWeight.bold),
+                ),
+              ),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                decoration: BoxDecoration(
+                  color: timeLeft > 10 ? Colors.green : Colors.red,
+                  borderRadius: BorderRadius.circular(20),
+                  boxShadow: const [
+                    BoxShadow(color: Colors.black26, blurRadius: 4)
+                  ],
+                ),
+                child: Text(
+                  'Tiempo: $timeLeft',
+                  style: const TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white),
+                ),
+              ),
+            ],
+          ),
+        ),
+
+        // Bunny
+        if (bunnyVisible)
+          Positioned(
+            left: MediaQuery.of(context).size.width * bunnyX - 30,
+            top: MediaQuery.of(context).size.height * bunnyY - 30,
+            child: GestureDetector(
+              onTap: catchBunny,
+              child: Container(
+                width: 60,
+                height: 60,
+                decoration: const BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Colors.white,
+                  boxShadow: [
+                    BoxShadow(
+                        color: Colors.black26, blurRadius: 8, spreadRadius: 2)
+                  ],
+                ),
+                child: const Center(
+                  child: Text('🐰', style: TextStyle(fontSize: 35)),
+                ),
+              ),
+            ),
+          ),
+
+        // Instrucciones
+        if (!bunnyVisible && gameStarted && !gameEnded)
+          Positioned(
+            bottom: 100,
+            left: 20,
+            right: 20,
+            child: Center(
+              child: Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.9),
+                  borderRadius: BorderRadius.circular(15),
+                ),
+                child: const Text(
+                  '¡Espera a que aparezca el bunny y tócalo rápido!',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}

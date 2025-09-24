@@ -1,0 +1,580 @@
+import 'dart:async';
+import 'dart:math';
+import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import '../widgets/banner_ad_widget.dart';
+import 'cosmic_equation_chase.dart';
+
+/// Versión limpia y autocontenida de la pantalla del juego.
+/// Hace un pequeño nudging cuando aparece el teclado (IME).
+
+class GameLogic {
+  final ValueNotifier<int> puntaje = ValueNotifier<int>(0);
+  final ValueNotifier<int> highScore = ValueNotifier<int>(0);
+  final ValueNotifier<int> vidas = ValueNotifier<int>(3);
+  final ValueNotifier<String> operacion = ValueNotifier<String>('2 + 2');
+  int respuestaCorrecta = 4;
+  int nivel = 1;
+
+  void generarOperacion() {
+    final a = Random().nextInt(10) + 1;
+    final b = Random().nextInt(10) + 1;
+    operacion.value = '$a + $b';
+    respuestaCorrecta = a + b;
+  }
+
+  Future<void> loadHighScore() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      highScore.value = prefs.getInt('gg_highscore') ?? 0;
+    } catch (_) {}
+  }
+
+  Future<void> saveHighScoreIfNeeded() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (puntaje.value > highScore.value) {
+        highScore.value = puntaje.value;
+        await prefs.setInt('gg_highscore', highScore.value);
+      }
+    } catch (_) {}
+  }
+
+  void dispose() {
+    puntaje.dispose();
+    highScore.dispose();
+    vidas.dispose();
+    operacion.dispose();
+  }
+}
+
+class EnsureVisibleWhenFocused extends StatefulWidget {
+  final FocusNode focusNode;
+  final ScrollController scrollController;
+  final Widget child;
+  const EnsureVisibleWhenFocused({
+    Key? key,
+    required this.focusNode,
+    required this.scrollController,
+    required this.child,
+  }) : super(key: key);
+
+  @override
+  _EnsureVisibleWhenFocusedState createState() =>
+      _EnsureVisibleWhenFocusedState();
+}
+
+class _EnsureVisibleWhenFocusedState extends State<EnsureVisibleWhenFocused> {
+  void _handleFocusChange() {
+    if (widget.focusNode.hasFocus) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        try {
+          final renderBox = context.findRenderObject() as RenderBox?;
+          if (renderBox != null) {
+            final top = renderBox.localToGlobal(Offset.zero).dy;
+            final viewport = MediaQuery.of(context).size.height;
+            final target = (top - viewport * 0.22).clamp(0.0, double.infinity);
+            widget.scrollController.animateTo(target,
+                duration: const Duration(milliseconds: 300),
+                curve: Curves.easeOut);
+          }
+        } catch (_) {}
+      });
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    widget.focusNode.addListener(_handleFocusChange);
+  }
+
+  @override
+  void dispose() {
+    widget.focusNode.removeListener(_handleFocusChange);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
+}
+
+class GameScreen extends StatefulWidget {
+  const GameScreen({Key? key}) : super(key: key);
+
+  @override
+  State<GameScreen> createState() => _GameScreenState();
+}
+
+class _GameScreenState extends State<GameScreen> {
+  final TextEditingController respuestaController = TextEditingController();
+  final GlobalKey _answerFieldKey = GlobalKey();
+  late ScrollController _scrollController;
+  late FocusNode _answerFocusNode;
+  late GameLogic gameLogic;
+  Timer? _timer;
+  ValueNotifier<int> remainingSeconds = ValueNotifier<int>(10);
+  bool _gamePaused = false;
+  ValueNotifier<Color?> _textFieldColor = ValueNotifier<Color?>(null);
+  bool _showTutorial = false;
+  int _tutorialStep = 0;
+  bool _tutorialCompleted = false;
+
+  @override
+  void initState() {
+    super.initState();
+    gameLogic = GameLogic();
+    _scrollController = ScrollController();
+    _answerFocusNode = FocusNode();
+    gameLogic.loadHighScore();
+    gameLogic.generarOperacion();
+    _checkTutorial();
+    _resetTimer();
+  }
+
+  int get _timeLimit => 10;
+
+  void _resetTimer() {
+    _timer?.cancel();
+    remainingSeconds.value = _timeLimit;
+    _timer = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!mounted) return t.cancel();
+      remainingSeconds.value--;
+      if (remainingSeconds.value <= 0) {
+        t.cancel();
+        _handleTimeOut();
+      }
+    });
+  }
+
+  void _pauseGame() {
+    _gamePaused = true;
+    _timer?.cancel();
+  }
+
+  void _resumeGame() {
+    _gamePaused = false;
+    _resetTimer();
+  }
+
+  Future<void> _handleTimeOut() async {
+    await gameLogic.saveHighScoreIfNeeded();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+          content: Text(
+              'Se acabó el tiempo — respuesta: ${gameLogic.respuestaCorrecta}')),
+    );
+    await Future.delayed(const Duration(milliseconds: 800));
+    if (!mounted) return;
+    gameLogic.vidas.value--;
+    if (gameLogic.vidas.value <= 0) {
+      gameLogic.puntaje.value = 0;
+      gameLogic.vidas.value = 3;
+      gameLogic.generarOperacion();
+      _resetTimer();
+    } else {
+      gameLogic.generarOperacion();
+      _resetTimer();
+    }
+  }
+
+  Future<void> _verificarRespuesta() async {
+    final text = respuestaController.text.trim();
+    if (text.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Introduce una respuesta')));
+      return;
+    }
+    final value = int.tryParse(text);
+    if (value == null) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Respuesta inválida')));
+      return;
+    }
+
+    if (value == gameLogic.respuestaCorrecta) {
+      gameLogic.puntaje.value += 10;
+      _textFieldColor.value = Colors.green[100];
+      await Future.delayed(const Duration(milliseconds: 300));
+      _textFieldColor.value = null;
+      gameLogic.generarOperacion();
+      respuestaController.clear();
+      _resetTimer();
+      // Mantener el foco en el campo de respuesta para que el teclado no se cierre
+      FocusScope.of(context).requestFocus(_answerFocusNode);
+    } else {
+      gameLogic.vidas.value--;
+      _textFieldColor.value = Colors.red[100];
+      await Future.delayed(const Duration(milliseconds: 400));
+      _textFieldColor.value = null;
+      if (gameLogic.vidas.value <= 0) {
+        await gameLogic.saveHighScoreIfNeeded();
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(
+                'Perdiste — respuesta correcta: ${gameLogic.respuestaCorrecta}')));
+        gameLogic.puntaje.value = 0;
+        gameLogic.vidas.value = 3;
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(
+                'Has fallado. Vidas restantes: ${gameLogic.vidas.value}')));
+      }
+      gameLogic.generarOperacion();
+      respuestaController.clear();
+      _resetTimer();
+      // Volver a pedir foco para que el teclado permanezca abierto
+      FocusScope.of(context).requestFocus(_answerFocusNode);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('Math Game'),
+          centerTitle: true,
+          backgroundColor: Colors.indigo,
+          actions: [
+            IconButton(
+              icon: Icon(_gamePaused ? Icons.play_arrow : Icons.pause),
+              onPressed: () {
+                setState(() => _gamePaused = !_gamePaused);
+                if (_gamePaused)
+                  _pauseGame();
+                else
+                  _resumeGame();
+              },
+            )
+          ],
+        ),
+        resizeToAvoidBottomInset: true,
+        body: Container(
+          height: double.infinity,
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+                colors: [Colors.indigo.shade200, Colors.indigo.shade700]),
+          ),
+          child: Stack(
+            children: [
+              SingleChildScrollView(
+                controller: _scrollController,
+                // Mantener la UI estática: no movemos la vista cuando aparece el teclado.
+                // Seguimos permitiendo que el teclado se muestre; mantenemos foco para
+                // evitar que se cierre automáticamente.
+                padding: const EdgeInsets.fromLTRB(12, 12, 12, 24),
+                child: Builder(builder: (context) {
+                  final mq = MediaQuery.of(context);
+                  final availableHeight = mq.size.height -
+                      mq.viewInsets.bottom -
+                      kToolbarHeight -
+                      mq.padding.vertical;
+                  return ConstrainedBox(
+                    constraints: BoxConstraints(minHeight: availableHeight),
+                    child: Column(
+                      children: [
+                        const SizedBox(height: 6),
+                        SizedBox(
+                          // Hacemos la caja de la ecuación más compacta
+                          height: MediaQuery.of(context).size.height * 0.12,
+                          child: Center(
+                            child: ValueListenableBuilder<String>(
+                              valueListenable: gameLogic.operacion,
+                              builder: (context, op, child) => Text(op,
+                                  style: const TextStyle(
+                                      fontSize: 34,
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.white)),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Row(
+                              children: [
+                                Text('Nivel ${gameLogic.nivel}',
+                                    style: const TextStyle(
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.bold)),
+                                const SizedBox(width: 8),
+                                IconButton(
+                                  onPressed: () {
+                                    setState(() {
+                                      _showTutorial = true;
+                                      _tutorialStep = 0;
+                                    });
+                                  },
+                                  icon: const Icon(Icons.help_outline,
+                                      color: Colors.orange, size: 24),
+                                  tooltip: 'Ver tutorial',
+                                  constraints: const BoxConstraints(),
+                                  padding: EdgeInsets.zero,
+                                ),
+                              ],
+                            ),
+                            ValueListenableBuilder<int>(
+                              valueListenable: gameLogic.vidas,
+                              builder: (context, vidas, child) => Row(
+                                  children: List.generate(
+                                      3,
+                                      (i) => Icon(
+                                          i < vidas
+                                              ? Icons.favorite
+                                              : Icons.favorite_border,
+                                          color: Colors.redAccent))),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 4),
+                        // La caja de respuesta se mantiene en su lugar (estática)
+                        Card(
+                          elevation: 6,
+                          shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12)),
+                          child: Padding(
+                            padding: const EdgeInsets.all(12.0),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                const Text('¿Cuánto es?',
+                                    style: TextStyle(
+                                        fontSize: 18,
+                                        fontWeight: FontWeight.w600,
+                                        color: Colors.indigo)),
+                                const SizedBox(height: 8),
+                                const SizedBox(height: 6),
+                                ValueListenableBuilder<Color?>(
+                                  valueListenable: _textFieldColor,
+                                  builder: (context, color, child) => TextField(
+                                    key: _answerFieldKey,
+                                    focusNode: _answerFocusNode,
+                                    controller: respuestaController,
+                                    keyboardType: TextInputType.number,
+                                    decoration: InputDecoration(
+                                      labelText: 'Tu respuesta',
+                                      border: OutlineInputBorder(
+                                          borderRadius:
+                                              BorderRadius.circular(10)),
+                                      prefixIcon: const Icon(Icons.calculate,
+                                          color: Colors.indigo),
+                                      filled: true,
+                                      fillColor: color ?? Colors.white,
+                                    ),
+                                    onSubmitted: (_) => _verificarRespuesta(),
+                                  ),
+                                ),
+                                const SizedBox(height: 10),
+                                ElevatedButton.icon(
+                                  onPressed: _verificarRespuesta,
+                                  icon: const Icon(Icons.check,
+                                      color: Colors.white),
+                                  label: const Text('Verificar',
+                                      style: TextStyle(color: Colors.white)),
+                                  style: ElevatedButton.styleFrom(
+                                      backgroundColor: Colors.green),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        ElevatedButton.icon(
+                          onPressed: () async {
+                            final result = await Navigator.push<int>(
+                                context,
+                                MaterialPageRoute(
+                                    builder: (_) =>
+                                        const CosmicEquationChase()));
+                            if (result != null)
+                              gameLogic.puntaje.value += result;
+                          },
+                          icon: const Icon(Icons.star),
+                          label: const Text('Jugar Mini-Juego Bonus'),
+                          style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.orange),
+                        ),
+                        const SizedBox(height: 12),
+                      ],
+                    ),
+                  );
+                }),
+              ),
+              // Banner anclado siempre abajo (overlay). Si aparece sobre contenido
+              // está bien según lo solicitado; no lo movemos al medio.
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 12,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    ValueListenableBuilder<int>(
+                      valueListenable: remainingSeconds,
+                      builder: (context, seconds, child) => Text('$seconds s',
+                          style: const TextStyle(
+                              fontSize: 32,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white)),
+                    ),
+                    const SizedBox(height: 6),
+                    const BannerAdWidget(),
+                  ],
+                ),
+              ),
+
+              // Tutorial overlay
+              _buildTutorialOverlay(),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _checkTutorial() async {
+    final prefs = await SharedPreferences.getInstance();
+    _tutorialCompleted =
+        prefs.getBool('guess_game_tutorial_completed') ?? false;
+    if (!_tutorialCompleted) {
+      setState(() {
+        _showTutorial = true;
+        _tutorialStep = 0;
+      });
+    }
+  }
+
+  void _nextTutorialStep() {
+    setState(() {
+      _tutorialStep++;
+      if (_tutorialStep >= _getTutorialSteps().length) {
+        _completeTutorial();
+      }
+    });
+  }
+
+  void _completeTutorial() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('guess_game_tutorial_completed', true);
+    setState(() {
+      _showTutorial = false;
+      _tutorialCompleted = true;
+    });
+  }
+
+  List<Map<String, String>> _getTutorialSteps() {
+    return [
+      {
+        'title': '¡Bienvenido al Juego de Matemáticas!',
+        'content':
+            'Resuelve las ecuaciones lo más rápido posible para obtener la máxima puntuación.',
+      },
+      {
+        'title': 'Cómo jugar',
+        'content':
+            '1. Ve la ecuación en la pantalla\n2. Escribe tu respuesta en el campo de texto\n3. Presiona Enter o el botón ✓',
+      },
+      {
+        'title': 'Sistema de vidas',
+        'content':
+            'Tienes 3 vidas. Cada respuesta incorrecta te quita una vida. ¡Si pierdes todas las vidas, el juego termina!',
+      },
+      {
+        'title': 'Tiempo límite',
+        'content':
+            'Tienes 10 segundos para responder cada ecuación. Si se agota el tiempo, pierdes una vida.',
+      },
+      {
+        'title': 'Mini-juego y Records',
+        'content':
+            'Accede al emocionante mini-juego Cosmic Chase y compite por el record más alto. ¡Cada respuesta correcta suma puntos!',
+      },
+    ];
+  }
+
+  Widget _buildTutorialOverlay() {
+    if (!_showTutorial) return const SizedBox.shrink();
+
+    final steps = _getTutorialSteps();
+    if (_tutorialStep >= steps.length) return const SizedBox.shrink();
+
+    final currentStep = steps[_tutorialStep];
+
+    return Container(
+      color: Colors.black.withOpacity(0.8),
+      child: Center(
+        child: Container(
+          margin: const EdgeInsets.all(32),
+          padding: const EdgeInsets.all(24),
+          decoration: BoxDecoration(
+            color: Colors.blue[800],
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: Colors.orange, width: 2),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                currentStep['title']!,
+                style: const TextStyle(
+                  color: Colors.orange,
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 16),
+              Text(
+                currentStep['content']!,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 16,
+                  height: 1.4,
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 24),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  Text(
+                    'Paso ${_tutorialStep + 1} de ${steps.length}',
+                    style: const TextStyle(
+                      color: Colors.grey,
+                      fontSize: 14,
+                    ),
+                  ),
+                  ElevatedButton(
+                    onPressed: _nextTutorialStep,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.orange,
+                      foregroundColor: Colors.white,
+                    ),
+                    child: Text(_tutorialStep == steps.length - 1
+                        ? '¡Comenzar!'
+                        : 'Siguiente'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    _scrollController.dispose();
+    _answerFocusNode.dispose();
+    respuestaController.dispose();
+    remainingSeconds.dispose();
+    _textFieldColor.dispose();
+    gameLogic.dispose();
+    super.dispose();
+  }
+}

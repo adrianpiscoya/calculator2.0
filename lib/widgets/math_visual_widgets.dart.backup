@@ -1,0 +1,677 @@
+import 'package:flutter/material.dart';
+
+/// **SISTEMA VISUAL MATEMÁTICO SIMPLIFICADO** 🎯
+/// 
+/// Versión segura que evita overflows y funciona de manera confiable:
+/// - MathDisplayWidget con reemplazo simple de símbolos
+/// - Widgets especializados disponibles para uso manual
+/// - Sin parsing complejo que cause problemas// =====================================================================
+// 🔥 1. WIDGET DE RAÍZ CUADRADA EXTENDIDA
+// =====================================================================
+
+class MathSquareRootWidget extends StatelessWidget {
+  final Widget child;
+  final double strokeWidth;
+  final Color color;
+  final int rootIndex; // Para raíces cúbicas, etc.
+
+  const MathSquareRootWidget({
+    Key? key,
+    required this.child,
+    this.strokeWidth = 2.0,
+    this.color = Colors.white,
+    this.rootIndex = 2, // 2 = raíz cuadrada, 3 = cúbica, etc.
+  }) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    return CustomPaint(
+      painter: _SquareRootPainter(
+        strokeWidth: strokeWidth,
+        color: color,
+        rootIndex: rootIndex,
+      ),
+      child: Container(
+        margin: EdgeInsets.only(
+          left: rootIndex == 2 ? 25 : 35, // Más espacio para índices superiores
+          top: 8,
+          bottom: 4,
+        ),
+        padding: EdgeInsets.only(top: 4, right: 4, bottom: 2),
+        child: child,
+      ),
+    );
+  }
+}
+
+class _SquareRootPainter extends CustomPainter {
+  final double strokeWidth;
+  final Color color;
+  final int rootIndex;
+
+  _SquareRootPainter({
+    required this.strokeWidth,
+    required this.color,
+    required this.rootIndex,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = strokeWidth
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round;
+
+    final path = Path();
+
+    // Dimensiones dinámicas basadas en el contenido
+    double height = size.height + 8;
+    double topY = 4;
+    double bottomY = height - 4;
+
+    // **ÉPICO**: Símbolo √ que se extiende según el contenido
+    if (rootIndex == 2) {
+      // Raíz cuadrada clásica
+      path.moveTo(8, bottomY * 0.6); // Punto inicio izquierdo
+      path.lineTo(12, bottomY); // Bajada
+      path.lineTo(18, topY); // Subida diagonal
+      path.lineTo(size.width + 20, topY); // Línea horizontal superior
+    } else {
+      // Raíces superiores (cúbica, etc.) con índice pequeño
+      path.moveTo(12, bottomY * 0.6);
+      path.lineTo(16, bottomY);
+      path.lineTo(22, topY);
+      path.lineTo(size.width + 25, topY);
+
+      // Dibujar el índice pequeño para raíces superiores
+      TextPainter indexPainter = TextPainter(
+        text: TextSpan(
+          text: rootIndex.toString(),
+          style: TextStyle(
+            color: color,
+            fontSize: 12,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      );
+      indexPainter.layout();
+      indexPainter.paint(canvas, Offset(2, topY - 2));
+    }
+
+    canvas.drawPath(path, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
+}
+
+// =====================================================================
+// 🔥 2. WIDGET DE FRACCIONES PERSISTENTES
+// =====================================================================
+
+class MathFractionWidget extends StatelessWidget {
+  final Widget numerator;
+  final Widget denominator;
+  final double lineThickness;
+  final Color lineColor;
+  final EdgeInsets padding;
+
+  const MathFractionWidget({
+    Key? key,
+    required this.numerator,
+    required this.denominator,
+    this.lineThickness = 2.0,
+    this.lineColor = Colors.white,
+    this.padding = const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+  }) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    return IntrinsicWidth(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Numerador
+          Container(
+            padding: EdgeInsets.only(bottom: 4),
+            child: numerator,
+          ),
+
+          // **ÉPICO**: Línea divisoria que se ajusta al contenido
+          CustomPaint(
+            painter: _FractionLinePainter(
+              thickness: lineThickness,
+              color: lineColor,
+            ),
+            child: Container(
+              height: lineThickness,
+              width: double.infinity,
+            ),
+          ),
+
+          // Denominador
+          Container(
+            padding: EdgeInsets.only(top: 4),
+            child: denominator,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _FractionLinePainter extends CustomPainter {
+  final double thickness;
+  final Color color;
+
+  _FractionLinePainter({
+    required this.thickness,
+    required this.color,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = thickness
+      ..style = PaintingStyle.stroke;
+
+    // Línea horizontal que se extiende según el contenido más ancho
+    canvas.drawLine(
+      Offset(0, thickness / 2),
+      Offset(size.width, thickness / 2),
+      paint,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+// =====================================================================
+// 🔥 3. WIDGET DE EXPONENTES ELEVADOS
+// =====================================================================
+
+class MathExponentWidget extends StatelessWidget {
+  final Widget base;
+  final Widget exponent;
+  final double exponentScale;
+  final Color textColor;
+
+  const MathExponentWidget({
+    Key? key,
+    required this.base,
+    required this.exponent,
+    this.exponentScale = 0.6, // Exponente 60% del tamaño base
+    this.textColor = Colors.white,
+  }) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Base (tamaño normal)
+        base,
+
+        // **ÉPICO**: Exponente elevado visualmente
+        Transform.translate(
+          offset: Offset(0, -8), // Elevado 8 píxeles
+          child: Transform.scale(
+            scale: exponentScale,
+            child: exponent,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// =====================================================================
+// 🔥 4. PARSER DE EXPRESIONES MATEMÁTICAS
+// =====================================================================
+
+enum MathElementType {
+  text,
+  squareRoot,
+  cubeRoot,
+  fraction,
+  exponent,
+  parentheses,
+}
+
+class MathElement {
+  final MathElementType type;
+  final String content;
+  final List<MathElement>? children;
+  final Map<String, dynamic>? properties;
+
+  MathElement({
+    required this.type,
+    required this.content,
+    this.children,
+    this.properties,
+  });
+}
+
+class MathExpressionParser {
+  /// **PARSER DESHABILITADO TEMPORALMENTE** 
+  /// Para evitar overflow, solo usamos reemplazo simple de símbolos
+  static List<MathElement> parse(String expression) {
+    // Devolver solo texto normal para evitar problemas
+    return [MathElement(type: MathElementType.text, content: expression)];
+  }
+}
+    int i = startIndex;
+
+    // Saltar el símbolo o texto de raíz
+    if (expression.startsWith('√', i)) {
+      i += 1;
+    } else if (expression.startsWith('sqrt(', i)) {
+      i += 5; // saltar 'sqrt('
+    }
+
+    // Encontrar el contenido entre paréntesis o hasta el próximo operador
+    String content = '';
+    int parenCount = 0;
+    bool inParens = expression[i] == '(' || expression[i - 1] == '(';
+
+    if (inParens && expression[i] != '(') {
+      // Ya estamos después del '(' en sqrt(
+      parenCount = 1;
+    } else if (expression[i] == '(') {
+      parenCount = 1;
+      i++; // saltar el '('
+    }
+
+    while (i < expression.length) {
+      var currentChar = expression[i];
+
+      if (inParens) {
+        if (currentChar == '(')
+          parenCount++;
+        else if (currentChar == ')') parenCount--;
+
+        if (parenCount == 0) break;
+      } else {
+        // Sin paréntesis, tomar hasta operador o espacio
+        if ('+- *×÷/^()'.contains(currentChar)) break;
+      }
+
+      content += currentChar;
+      i++;
+    }
+
+    // Saltar ')' si es necesario
+    if (i < expression.length && expression[i] == ')') i++;
+
+    return ParseResult(
+      element: MathElement(
+        type: MathElementType.squareRoot,
+        content: content,
+      ),
+      nextIndex: i,
+    );
+  }
+
+  static ParseResult _parseCubeRoot(String expression, int startIndex) {
+    // Similar a square root pero para raíz cúbica
+    int i = startIndex;
+
+    if (expression.startsWith('∛', i)) {
+      i += 1;
+    } else if (expression.startsWith('cbrt(', i)) {
+      i += 5;
+    }
+
+    String content = '';
+    int parenCount = 0;
+    bool inParens = expression[i] == '(' || expression[i - 1] == '(';
+    // double baseWidth = rootIndex == 2 ? 20 : 30; // Eliminada: no se usa
+    if (inParens && expression[i] != '(') {
+      parenCount = 1;
+    } else if (expression[i] == '(') {
+      parenCount = 1;
+      i++;
+    }
+
+    while (i < expression.length) {
+      var currentChar = expression[i];
+
+      if (inParens) {
+        if (currentChar == '(')
+          parenCount++;
+        else if (currentChar == ')') parenCount--;
+        if (parenCount == 0) break;
+      } else {
+        if ('+- *×÷/^()'.contains(currentChar)) break;
+      }
+
+      content += currentChar;
+      i++;
+    }
+
+    if (i < expression.length && expression[i] == ')') i++;
+
+    return ParseResult(
+      element: MathElement(
+        type: MathElementType.cubeRoot,
+        content: content,
+      ),
+      nextIndex: i,
+    );
+  }
+
+  static ParseResult? _tryParseFraction(String expression, int startIndex) {
+    // Buscar patrón número/número o (expresión)/(expresión)
+    int i = startIndex;
+    String numerator = '';
+    String denominator = '';
+
+    // Leer numerador
+    if (expression[i] == '(') {
+      // Numerador con paréntesis
+      int parenCount = 1;
+      i++; // saltar '('
+      while (i < expression.length && parenCount > 0) {
+        if (expression[i] == '(')
+          parenCount++;
+        else if (expression[i] == ')') parenCount--;
+        if (parenCount > 0) numerator += expression[i];
+        i++;
+      }
+    } else {
+      // Numerador simple (número o variable)
+      while (i < expression.length &&
+          '0123456789.abcdefghijklmnopqrstuvwxyzπe'.contains(expression[i])) {
+        numerator += expression[i];
+        i++;
+      }
+    }
+
+    // Verificar si sigue '/'
+    if (i >= expression.length || expression[i] != '/') {
+      return null; // No es una fracción
+    }
+    i++; // saltar '/'
+
+    // Leer denominador
+    if (i < expression.length && expression[i] == '(') {
+      // Denominador con paréntesis
+      int parenCount = 1;
+      i++; // saltar '('
+      while (i < expression.length && parenCount > 0) {
+        if (expression[i] == '(')
+          parenCount++;
+        else if (expression[i] == ')') parenCount--;
+        if (parenCount > 0) denominator += expression[i];
+        i++;
+      }
+    } else {
+      // Denominador simple
+      while (i < expression.length &&
+          '0123456789.abcdefghijklmnopqrstuvwxyzπe'.contains(expression[i])) {
+        denominator += expression[i];
+        i++;
+      }
+    }
+
+    if (numerator.isEmpty || denominator.isEmpty) {
+      return null; // Fracción inválida
+    }
+
+    return ParseResult(
+      element: MathElement(
+        type: MathElementType.fraction,
+        content: '$numerator/$denominator',
+        properties: {
+          'numerator': numerator,
+          'denominator': denominator,
+        },
+      ),
+      nextIndex: i,
+    );
+  }
+
+  static ParseResult? _tryParseExponent(String expression, int startIndex) {
+    // Buscar patrón base^exponente
+    int i = startIndex;
+    String base = '';
+    String exponent = '';
+
+    // Leer base (retroceder si es necesario para capturar base completa)
+    int baseStart = startIndex;
+    while (baseStart > 0 &&
+        '0123456789.abcdefghijklmnopqrstuvwxyzπe)'
+            .contains(expression[baseStart - 1])) {
+      baseStart--;
+    }
+
+    // Si la base termina en ')', encontrar el inicio del paréntesis
+    if (baseStart < startIndex && expression[startIndex - 1] == ')') {
+      int parenCount = 1;
+      int j = startIndex - 2;
+      while (j >= 0 && parenCount > 0) {
+        if (expression[j] == ')')
+          parenCount++;
+        else if (expression[j] == '(') parenCount--;
+        j--;
+      }
+      baseStart = j + 1;
+    }
+
+    base = expression.substring(baseStart, startIndex);
+    i = startIndex;
+
+    // Verificar si sigue '^'
+    if (i >= expression.length || expression[i] != '^') {
+      return null; // No es un exponente
+    }
+    i++; // saltar '^'
+
+    // Leer exponente
+    if (i < expression.length && expression[i] == '(') {
+      // Exponente con paréntesis
+      int parenCount = 1;
+      i++; // saltar '('
+      while (i < expression.length && parenCount > 0) {
+        if (expression[i] == '(')
+          parenCount++;
+        else if (expression[i] == ')') parenCount--;
+        if (parenCount > 0) exponent += expression[i];
+        i++;
+      }
+    } else {
+      // Exponente simple
+      while (i < expression.length &&
+          '0123456789.+-abcdefghijklmnopqrstuvwxyzπe'.contains(expression[i])) {
+        exponent += expression[i];
+        i++;
+      }
+    }
+
+    if (base.isEmpty || exponent.isEmpty) {
+      return null; // Exponente inválido
+    }
+
+    return ParseResult(
+      element: MathElement(
+        type: MathElementType.exponent,
+        content: '$base^$exponent',
+        properties: {
+          'base': base,
+          'exponent': exponent,
+        },
+      ),
+      nextIndex: i,
+    );
+  }
+}
+
+class ParseResult {
+  final MathElement element;
+  final int nextIndex;
+
+  ParseResult({
+    required this.element,
+    required this.nextIndex,
+  });
+}
+
+// =====================================================================
+// 🔥 5. WIDGET CONTENEDOR MATEMÁTICO PRINCIPAL
+// =====================================================================
+
+class MathDisplayWidget extends StatelessWidget {
+  final String expression;
+  final TextStyle? baseTextStyle;
+  final Color mathColor;
+  final double fontSize;
+
+  const MathDisplayWidget({
+    Key? key,
+    required this.expression,
+    this.baseTextStyle,
+    this.mathColor = Colors.white,
+    this.fontSize = 24,
+  }) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    // **ULTRA SIMPLE**: Solo texto con símbolos básicos (sin parsing complejo)
+    // Esto evita completamente los overflows
+    
+    final defaultStyle = TextStyle(
+      fontSize: fontSize,
+      color: mathColor,
+      fontFamily: 'RobotoMono',
+      fontWeight: FontWeight.bold,
+    );
+    
+    return Text(
+      _safeSymbolReplacement(expression),
+      style: baseTextStyle ?? defaultStyle,
+    );
+  }
+  
+  /// Reemplazo seguro de símbolos básicos
+  String _safeSymbolReplacement(String expr) {
+    return expr
+        .replaceAll('sqrt', '√')
+        .replaceAll('pi', 'π')
+        .replaceAll('*', '×')
+        .replaceAll('/', '÷')
+        .replaceAll('cbrt', '∛');
+  }  Widget _buildMathElement(MathElement element) {
+    final textStyle = baseTextStyle ??
+        TextStyle(
+          fontSize: fontSize,
+          color: mathColor,
+          fontFamily: 'RobotoMono',
+          fontWeight: FontWeight.bold,
+        );
+
+    switch (element.type) {
+      case MathElementType.squareRoot:
+        return MathSquareRootWidget(
+          color: mathColor,
+          rootIndex: 2,
+          child: Text(
+            element.content,
+            style: textStyle,
+          ),
+        );
+
+      case MathElementType.cubeRoot:
+        return MathSquareRootWidget(
+          color: mathColor,
+          rootIndex: 3,
+          child: Text(
+            element.content,
+            style: textStyle,
+          ),
+        );
+
+      case MathElementType.fraction:
+        final props = element.properties!;
+        return MathFractionWidget(
+          lineColor: mathColor,
+          numerator: Text(
+            props['numerator'],
+            style: textStyle.copyWith(fontSize: fontSize * 0.85),
+          ),
+          denominator: Text(
+            props['denominator'],
+            style: textStyle.copyWith(fontSize: fontSize * 0.85),
+          ),
+        );
+
+      case MathElementType.exponent:
+        final props = element.properties!;
+        return MathExponentWidget(
+          base: Text(
+            props['base'],
+            style: textStyle,
+          ),
+          exponent: Text(
+            props['exponent'],
+            style: textStyle.copyWith(fontSize: fontSize * 0.6),
+          ),
+        );
+
+      case MathElementType.text:
+      default:
+        return Text(
+          element.content,
+          style: textStyle,
+        );
+    }
+  }
+}
+
+// =====================================================================
+// 🔥 6. UTILIDADES Y EXTENSIONES
+// =====================================================================
+
+extension MathSymbols on String {
+  /// Convierte símbolos de texto a Unicode matemático
+  String toMathSymbols() {
+    return this
+        .replaceAll('sqrt', '√')
+        .replaceAll('cbrt', '∛')
+        .replaceAll('pi', 'π')
+        .replaceAll('*', '×')
+        .replaceAll('/', '÷')
+        .replaceAll('+-', '±')
+        .replaceAll('infinity', '∞')
+        .replaceAll('alpha', 'α')
+        .replaceAll('beta', 'β')
+        .replaceAll('gamma', 'γ')
+        .replaceAll('delta', 'Δ')
+        .replaceAll('theta', 'θ')
+        .replaceAll('lambda', 'λ')
+        .replaceAll('mu', 'μ')
+        .replaceAll('sigma', 'σ')
+        .replaceAll('phi', 'φ');
+  }
+}
+
+/// **CONSTANTES MATEMÁTICAS VISUALES**
+class MathVisualConstants {
+  static const double defaultFontSize = 24.0;
+  static const double fractionScale = 0.85;
+  static const double exponentScale = 0.6;
+  static const double rootStrokeWidth = 2.0;
+  static const double fractionLineThickness = 2.0;
+
+  static const Color defaultMathColor = Colors.white;
+  static const Color accentMathColor = Colors.amber;
+  static const Color errorMathColor = Colors.red;
+
+  static const EdgeInsets defaultPadding = EdgeInsets.all(4.0);
+  static const EdgeInsets fractionPadding =
+      EdgeInsets.symmetric(horizontal: 8, vertical: 4);
+}

@@ -1,0 +1,60 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <!-- Fondo del icono -->
+  <rect width="512" height="512" rx="64" ry="64" fill="#2c3e50"/>
+  
+  <!-- Pantalla de la calculadora -->
+  <rect x="50" y="80" width="412" height="100" rx="8" ry="8" fill="#34495e" stroke="#95a5a6" stroke-width="2"/>
+  
+  <!-- Texto en la pantalla -->
+  <text x="420" y="140" font-family="Arial, sans-serif" font-size="32" fill="#ecf0f1" text-anchor="end">123.45</text>
+  
+  <!-- Botones de la calculadora -->
+  <!-- Fila 1 -->
+  <circle cx="100" cy="240" r="30" fill="#e74c3c"/>
+  <text x="100" y="248" font-family="Arial, sans-serif" font-size="20" fill="white" text-anchor="middle">C</text>
+  
+  <circle cx="200" cy="240" r="30" fill="#f39c12"/>
+  <text x="200" y="248" font-family="Arial, sans-serif" font-size="20" fill="white" text-anchor="middle">÷</text>
+  
+  <circle cx="300" cy="240" r="30" fill="#f39c12"/>
+  <text x="300" y="248" font-family="Arial, sans-serif" font-size="20" fill="white" text-anchor="middle">×</text>
+  
+  <circle cx="400" cy="240" r="30" fill="#f39c12"/>
+  <text x="400" y="248" font-family="Arial, sans-serif" font-size="20" fill="white" text-anchor="middle">-</text>
+  
+  <!-- Fila 2 -->
+  <circle cx="100" cy="320" r="30" fill="#3498db"/>
+  <text x="100" y="328" font-family="Arial, sans-serif" font-size="20" fill="white" text-anchor="middle">7</text>
+  
+  <circle cx="200" cy="320" r="30" fill="#3498db"/>
+  <text x="200" y="328" font-family="Arial, sans-serif" font-size="20" fill="white" text-anchor="middle">8</text>
+  
+  <circle cx="300" cy="320" r="30" fill="#3498db"/>
+  <text x="300" y="328" font-family="Arial, sans-serif" font-size="20" fill="white" text-anchor="middle">9</text>
+  
+  <rect x="370" y="290" width="60" height="90" rx="30" ry="30" fill="#e67e22"/>
+  <text x="400" y="338" font-family="Arial, sans-serif" font-size="20" fill="white" text-anchor="middle">+</text>
+  
+  <!-- Fila 3 -->
+  <circle cx="100" cy="400" r="30" fill="#3498db"/>
+  <text x="100" y="408" font-family="Arial, sans-serif" font-size="20" fill="white" text-anchor="middle">4</text>
+  
+  <circle cx="200" cy="400" r="30" fill="#3498db"/>
+  <text x="200" y="408" font-family="Arial, sans-serif" font-size="20" fill="white" text-anchor="middle">5</text>
+  
+  <circle cx="300" cy="400" r="30" fill="#3498db"/>
+  <text x="300" y="408" font-family="Arial, sans-serif" font-size="20" fill="white" text-anchor="middle">6</text>
+  
+  <!-- Fila 4 -->
+  <circle cx="100" cy="480" r="30" fill="#3498db"/>
+  <text x="100" y="488" font-family="Arial, sans-serif" font-size="20" fill="white" text-anchor="middle">1</text>
+  
+  <circle cx="200" cy="480" r="30" fill="#3498db"/>
+  <text x="200" y="488" font-family="Arial, sans-serif" font-size="20" fill="white" text-anchor="middle">2</text>
+  
+  <circle cx="300" cy="480" r="30" fill="#3498db"/>
+  <text x="300" y="488" font-family="Arial, sans-serif" font-size="20" fill="white" text-anchor="middle">3</text>
+  
+  <rect x="370" y="410" width="60" height="90" rx="30" ry="30" fill="#27ae60"/>
+  <text x="400" y="458" font-family="Arial, sans-serif" font-size="20" fill="white" text-anchor="middle">=</text>
+</svg>

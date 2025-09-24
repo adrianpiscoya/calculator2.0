@@ -1,0 +1,60 @@
+{
+  "app_title": "Advanced Calculator",
+  "calculator_title": "Calculadora Científica",
+  
+  "basic_mode": "Básico",
+  "trigonometric_mode": "Trigonométrico", 
+  "advanced_mode": "Avanzado",
+  "constants_mode": "Constantes",
+  "fractions_mode": "Fracciones",
+  
+  "whats_the_result": "¿Cuánto es?",
+  "your_answer": "Tu respuesta",
+  "verify": "Verificar",
+  "introduce_answer": "Introduce una respuesta",
+  "invalid_answer": "Respuesta inválida",
+  "math_game": "Juego Matemático",
+  
+  "statistics": "Estadísticas",
+  "no_data_to_save": "No hay datos para guardar",
+  "dataset_saved": "Dataset guardado",
+  "could_not_save": "No se pudo guardar",
+  "saved_datasets": "Datasets guardados",
+  "no_saved_datasets": "No hay datasets guardados",
+  "close": "Cerrar",
+  "history_deleted": "Historial eliminado",
+  "delete_all": "Borrar todo",
+  "error_sharing": "Error al compartir",
+  
+  "help_and_support": "Ayuda y Soporte",
+  "send_suggestions": "Enviar Sugerencias",
+  "share_your_ideas": "Comparte tus ideas para mejorar la app",
+  "report_problem": "Reportar Problema",
+  "help_us_improve": "Ayúdanos a mejorar reportando errores",
+  "rate_app": "Calificar App",
+  "share_app": "Compartir App",
+  
+  "game_over": "Game Over",
+  "score": "Puntaje",
+  "restart": "Reiniciar",
+  "exit": "Salir",
+  
+  "email_suggestion_sent": "✅ Se abrió tu app de email para enviar la sugerencia",
+  "send_suggestion": "📧 Enviar Sugerencia",
+  "share": "📱 Compartir",
+  
+  "premium_feature": "🎁 Función Premium",
+  "watch_ad_message": "Para acceder a esta función avanzada, mira un breve anuncio de recompensa.\n\n¡Es gratis y nos ayuda a mantener la app!",
+  "cancel": "Cancelar",
+  "watch_ad": "Ver anuncio 📺",
+  
+  "category": "1. Categoría",
+  "use_decimal_point": "Usa punto (.) para decimales",
+  "from_unit": "De",
+  "to_unit": "A",
+  
+  "pie": "Pie",
+  "bar": "Bar",
+  
+  "ads_disabled": "Ads deshabilitados"
+}

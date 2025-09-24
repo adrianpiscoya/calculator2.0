@@ -1,0 +1,1434 @@
+import 'dart:io';
+import 'dart:math' as math;
+import 'dart:ui' as ui;
+import 'package:flutter/foundation.dart';
+import 'dart:typed_data';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:fl_chart/fl_chart.dart';
+import 'dart:convert';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+class ChartDataPoint {
+  final String label;
+  final double value;
+  final Color? color;
+
+  ChartDataPoint(this.label, this.value, [this.color]);
+}
+
+class _EditablePoint {
+  final TextEditingController nameController = TextEditingController();
+  final TextEditingController valueController = TextEditingController();
+  Color? color;
+
+  void dispose() {
+    nameController.dispose();
+    valueController.dispose();
+  }
+}
+
+class StatisticsScreen extends StatefulWidget {
+  const StatisticsScreen({Key? key}) : super(key: key);
+
+  @override
+  State<StatisticsScreen> createState() => _StatisticsScreenState();
+}
+
+class _StatisticsScreenState extends State<StatisticsScreen> {
+  final GlobalKey repaintKey = GlobalKey();
+  final TextEditingController _titleController = TextEditingController();
+  final TextEditingController _dataController = TextEditingController();
+
+  List<ChartDataPoint> _data = [];
+  String _chartType = 'Pie';
+  bool _sharingInProgress = false;
+  bool _useStructuredInput = false;
+  List<_EditablePoint> _rows = [_EditablePoint()];
+  String _errorMessage = '';
+  List<Map<String, dynamic>> _savedDatasets = [];
+
+  // OPTIMIZACIÓN: Cache para estadísticas calculadas
+  Map<String, double>? _cachedStats;
+  String _lastDataHashForStats = '';
+
+  @override
+  void dispose() {
+    _titleController.dispose();
+    _dataController.dispose();
+    for (final r in _rows) r.dispose();
+    super.dispose();
+  }
+
+  void _addRow() => setState(() => _rows.add(_EditablePoint()));
+
+  void _removeRow(int idx) => setState(() {
+        _rows[idx].dispose();
+        _rows.removeAt(idx);
+      });
+
+  void _fillExample() {
+    _dataController.text = 'Norte:100,Sur:200,Este:75,Oeste:50';
+    _parseAndSet(_dataController.text);
+  }
+
+  // OPTIMIZACIÓN: Invalidar caché cuando datos cambian
+  void _invalidateStatsCache() {
+    _cachedStats = null;
+    _lastDataHashForStats = '';
+  }
+
+  void _processRows() {
+    final points = <ChartDataPoint>[];
+    for (final r in _rows) {
+      final name = r.nameController.text.trim();
+      final valueText = r.valueController.text.trim();
+      final value = double.tryParse(valueText.replaceAll(',', '.')) ?? 0.0;
+      if (name.isNotEmpty && value > 0)
+        points.add(ChartDataPoint(name, value, r.color));
+    }
+    if (points.isEmpty) {
+      setState(() => _errorMessage = 'Agrega al menos una fila con valor > 0');
+      return;
+    }
+    _invalidateStatsCache(); // Invalidar caché
+    setState(() {
+      _data = points;
+      _errorMessage = '';
+    });
+  }
+
+  void _parseAndSet(String raw) {
+    final parts = raw.split(',');
+    final list = <ChartDataPoint>[];
+    if (raw.trim().isEmpty) {
+      _invalidateStatsCache(); // Invalidar caché
+      setState(() {
+        _data = list;
+        _errorMessage = 'Ingresa datos.';
+      });
+      return;
+    }
+    bool hasValidData = false;
+    for (final p in parts) {
+      final kv = p.split(':');
+      if (kv.length != 2) continue;
+      final label = kv[0].trim();
+      final value = double.tryParse(kv[1].trim().replaceAll(',', '.')) ?? 0.0;
+      if (label.isNotEmpty && value > 0) {
+        list.add(ChartDataPoint(label, value));
+        hasValidData = true;
+      }
+    }
+    _invalidateStatsCache(); // Invalidar caché cuando datos cambian
+    if (!hasValidData) {
+      setState(() {
+        _data = list;
+        _errorMessage = 'Formato inválido o valores no numéricos';
+      });
+      return;
+    }
+    setState(() {
+      _data = list;
+      _errorMessage = '';
+    });
+  }
+
+  Future<void> _openFullscreenChart() async {
+    if (_data.isEmpty) return;
+    await Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => StatisticsChartView(
+          data: _data, title: _titleController.text, chartType: _chartType),
+    ));
+  }
+
+  Future<void> _saveCurrentDataset() async {
+    if (_data.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('No hay datos para guardar')));
+      }
+      return;
+    }
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final existing = List<String>.from(
+          prefs.getStringList('stats_datasets') ?? const <String>[]);
+      final dataset = {
+        'title': _titleController.text.trim(),
+        'type': _chartType,
+        'data': _data
+            .map((d) => {
+                  'label': d.label,
+                  'value': d.value,
+                  'color': d.color?.toARGB32()
+                })
+            .toList(),
+      };
+      // Dedupe por contenido lógico (type+data), ignorando el título
+      String keyFor(Map<String, dynamic> ds) => jsonEncode({
+            'type': ds['type'],
+            'data': ds['data'],
+          });
+      final newKey = keyFor(dataset);
+      final filtered = <String>[];
+      for (final s in existing) {
+        try {
+          final m = jsonDecode(s) as Map<String, dynamic>;
+          if (keyFor(m) == newKey) continue; // remover duplicado existente
+          filtered.add(s);
+        } catch (_) {
+          // Si falla el decode, conservamos la entrada para no perder datos antiguos
+          filtered.add(s);
+        }
+      }
+      final encoded = jsonEncode(dataset);
+      filtered.insert(0, encoded);
+      // Limitar a los últimos 3
+      while (filtered.length > 3) {
+        filtered.removeLast();
+      }
+      await prefs.setStringList('stats_datasets', filtered);
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('Dataset guardado')));
+      }
+      _loadDatasets();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('No se pudo guardar: $e')));
+      }
+    }
+  }
+
+  Future<void> _loadDatasets() async {
+    final prefs = await SharedPreferences.getInstance();
+    final list = prefs.getStringList('stats_datasets') ?? [];
+    final parsed = <Map<String, dynamic>>[];
+    for (final s in list) {
+      try {
+        parsed.add(jsonDecode(s) as Map<String, dynamic>);
+      } catch (_) {}
+    }
+    if (mounted) setState(() => _savedDatasets = parsed);
+  }
+
+  Future<void> _openDatasetsDialog() async {
+    await _loadDatasets();
+    if (!mounted) return;
+    await showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Datasets guardados'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: _savedDatasets.isEmpty
+              ? const Text('No hay datasets guardados')
+              : ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: _savedDatasets.length,
+                  itemBuilder: (_, i) {
+                    final ds = _savedDatasets[i];
+                    final title = (ds['title'] as String?)?.trim();
+                    return ListTile(
+                      title: Text(title?.isNotEmpty == true
+                          ? title!
+                          : 'Gráfico ${i + 1} (${ds['type']})'),
+                      subtitle: Text((ds['data'] as List)
+                          .map((e) => e['label'])
+                          .join(', ')),
+                      onTap: () {
+                        Navigator.pop(context);
+                        final raw = (ds['data'] as List);
+                        final dataList = raw.map((e) {
+                          final label = (e['label'] as String?) ?? '';
+                          final value = (e['value'] as num).toDouble();
+                          final colorInt = e['color'] as int?;
+                          final color =
+                              colorInt != null ? Color(colorInt) : null;
+                          return ChartDataPoint(label, value, color);
+                        }).toList();
+                        // If dataset has no colors, assign a palette offset based on dataset index
+                        final hasAnyColor =
+                            dataList.any((d) => d.color != null);
+                        if (!hasAnyColor) {
+                          for (int j = 0; j < dataList.length; j++) {
+                            dataList[j] = ChartDataPoint(
+                                dataList[j].label,
+                                dataList[j].value,
+                                Colors.primaries[
+                                    (j + i) % Colors.primaries.length]);
+                          }
+                        }
+                        setState(() {
+                          _data = dataList;
+                          _chartType = (ds['type'] as String?) ?? 'Pie';
+                          _errorMessage = '';
+                          _useStructuredInput = false;
+                          _dataController.text = dataList
+                              .map((d) => '${d.label}:${d.value}')
+                              .join(',');
+                        });
+                      },
+                    );
+                  },
+                ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cerrar')),
+          TextButton(
+              onPressed: () async {
+                final prefs = await SharedPreferences.getInstance();
+                await prefs.remove('stats_datasets');
+                if (!mounted) return;
+                Navigator.pop(context);
+                ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Historial eliminado')));
+              },
+              child: const Text('Borrar todo')),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _shareChart() async {
+    if (_sharingInProgress) return;
+    setState(() {
+      _sharingInProgress = true;
+    });
+
+    try {
+      final boundary = repaintKey.currentContext?.findRenderObject()
+          as RenderRepaintBoundary?;
+      if (boundary == null) throw 'No se encontró el gráfico para capturar.';
+
+      // Simplificar el proceso de captura para evitar errores
+      final ui.Image image = await boundary.toImage(pixelRatio: 1.5);
+      final ByteData? byteData =
+          await image.toByteData(format: ui.ImageByteFormat.png);
+      if (byteData == null) throw 'Error al convertir imagen.';
+      final Uint8List pngBytes = byteData.buffer.asUint8List();
+
+      // Escribir directamente sin compute para evitar problemas
+      final dir = await getTemporaryDirectory();
+      final file = File(
+          '${dir.path}/chart_${DateTime.now().millisecondsSinceEpoch}.png');
+      await file.writeAsBytes(pngBytes, flush: true);
+      final filePath = file.path;
+
+      // Crear texto simplificado para evitar errores
+      final now = DateTime.now();
+      final dateString = '${now.day}/${now.month}/${now.year}';
+
+      String shareText = '';
+      if (_titleController.text.isNotEmpty) {
+        shareText += '📊 ${_titleController.text}\n';
+      } else {
+        shareText += '📊 Gráfico de Estadísticas\n';
+      }
+
+      shareText += '📅 $dateString • ${_data.length} elementos\n';
+
+      if (_data.isNotEmpty && _data.length <= 10) {
+        // Limitar datos para evitar texto muy largo
+        shareText += '\n📝 DATOS:\n';
+        final total = _data.fold(0.0, (sum, item) => sum + item.value);
+        for (final item in _data.take(5)) {
+          // Solo los primeros 5
+          final percentage = total > 0 ? (item.value / total * 100) : 0.0;
+          shareText +=
+              '• ${item.label}: ${item.value.toStringAsFixed(1)} (${percentage.toStringAsFixed(1)}%)\n';
+        }
+        if (_data.length > 5) {
+          shareText += '• ... y ${_data.length - 5} más\n';
+        }
+      }
+
+      shareText += '\n📱 Calculadora Científica';
+
+      await Share.shareXFiles([XFile(filePath)], text: shareText);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error al compartir: $e'),
+            backgroundColor: Colors.redAccent,
+            behavior: SnackBarBehavior.floating,
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _sharingInProgress = false;
+        });
+      }
+    }
+  }
+
+  // OPTIMIZACIÓN: Cálculo de estadísticas con memoización
+  Map<String, double> _calculateStatistics() {
+    if (_data.isEmpty) return {};
+
+    // Crear hash simple de los datos para detectar cambios
+    final dataHash = _data.map((d) => '${d.label}:${d.value}').join(',');
+
+    // Si los datos no han cambiado, devolver caché
+    if (_cachedStats != null && _lastDataHashForStats == dataHash) {
+      return _cachedStats!;
+    }
+
+    // Calcular estadísticas solo si es necesario
+    final values = _data.map((d) => d.value).toList()..sort();
+    final sum = values.fold(0.0, (a, b) => a + b);
+    final mean = sum / values.length;
+    final median = values.length % 2 == 1
+        ? values[values.length ~/ 2]
+        : (values[values.length ~/ 2 - 1] + values[values.length ~/ 2]) / 2;
+    double modeValue = 0;
+    final freq = <double, int>{};
+    for (final v in values) freq[v] = (freq[v] ?? 0) + 1;
+    final maxFreq =
+        freq.values.isEmpty ? 0 : freq.values.reduce((a, b) => a > b ? a : b);
+    if (maxFreq > 1) {
+      final entry = freq.entries.firstWhere((e) => e.value == maxFreq);
+      modeValue = entry.key;
+    }
+    final meanSq =
+        values.map((v) => (v - mean) * (v - mean)).fold(0.0, (a, b) => a + b) /
+            values.length;
+    final stdDev = math.sqrt(meanSq);
+
+    // Guardar en caché
+    final result = {
+      'sum': sum,
+      'mean': mean,
+      'median': median,
+      'mode': modeValue,
+      'stdDev': stdDev
+    };
+
+    _cachedStats = result;
+    _lastDataHashForStats = dataHash;
+
+    return result;
+  }
+
+  Widget _buildPie() {
+    final sum = _data.fold(0.0, (a, b) => a + b.value);
+    return Column(
+      children: [
+        Expanded(
+          child: PieChart(
+            PieChartData(
+              centerSpaceRadius: 50,
+              sectionsSpace: 4,
+              sections: _data.asMap().entries.map((e) {
+                final i = e.key;
+                final d = e.value;
+                final percent = sum > 0 ? (d.value / sum) * 100 : 0.0;
+                return PieChartSectionData(
+                  value: d.value,
+                  color:
+                      d.color ?? Colors.primaries[i % Colors.primaries.length],
+                  radius: 80,
+                  title: '${percent.toStringAsFixed(1)}%',
+                  titleStyle: const TextStyle(
+                      fontSize: 11,
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold),
+                  titlePositionPercentageOffset: 0.6,
+                );
+              }).toList(),
+            ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        // Leyenda mejorada
+        SizedBox(
+          height: 60, // Altura fija para la leyenda
+          child: _buildPieLegend(),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildPieLegend() {
+    final sum = _data.fold(0.0, (a, b) => a + b.value);
+    return Container(
+      constraints: const BoxConstraints(maxHeight: 120),
+      child: SingleChildScrollView(
+        child: Wrap(
+          spacing: 6,
+          runSpacing: 4,
+          children: _data.take(6).toList().asMap().entries.map((e) {
+            // Limitar a 6 elementos
+            final i = e.key;
+            final d = e.value;
+            final percent = sum > 0 ? (d.value / sum) * 100 : 0.0;
+            final color =
+                d.color ?? Colors.primaries[i % Colors.primaries.length];
+
+            // Truncar texto largo
+            final shortLabel = d.label.length > 10
+                ? '${d.label.substring(0, 10)}...'
+                : d.label;
+
+            return Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+              decoration: BoxDecoration(
+                color: color.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: color.withOpacity(0.3)),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 10,
+                    height: 10,
+                    decoration: BoxDecoration(
+                      color: color,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  Flexible(
+                    child: Text(
+                      '$shortLabel: ${percent.toStringAsFixed(1)}%',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            fontWeight: FontWeight.w500,
+                            fontSize: 10,
+                          ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+            );
+          }).toList(),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBar() {
+    if (_data.isEmpty) return const SizedBox.shrink();
+    final maxY = _data.map((d) => d.value).reduce(math.max);
+    final groups = _data.asMap().entries.map((e) {
+      final i = e.key;
+      final d = e.value;
+      return BarChartGroupData(
+        x: i,
+        barRods: [
+          BarChartRodData(
+            toY: d.value,
+            color: d.color ?? Colors.primaries[i % Colors.primaries.length],
+            width: 30,
+            borderRadius: BorderRadius.circular(6),
+            gradient: LinearGradient(
+              colors: [
+                (d.color ?? Colors.primaries[i % Colors.primaries.length])
+                    .withOpacity(0.8),
+                (d.color ?? Colors.primaries[i % Colors.primaries.length]),
+              ],
+              begin: Alignment.bottomCenter,
+              end: Alignment.topCenter,
+            ),
+          ),
+        ],
+      );
+    }).toList();
+
+    return Column(
+      children: [
+        Expanded(
+          child: BarChart(
+            BarChartData(
+              maxY: maxY * 1.2,
+              barGroups: groups,
+              titlesData: FlTitlesData(
+                topTitles:
+                    const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                rightTitles:
+                    const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                leftTitles: AxisTitles(
+                  sideTitles: SideTitles(
+                    showTitles: true,
+                    reservedSize: 40,
+                    getTitlesWidget: (value, meta) {
+                      return Text(
+                        value.toStringAsFixed(0),
+                        style: const TextStyle(fontSize: 10),
+                      );
+                    },
+                  ),
+                ),
+                bottomTitles: AxisTitles(
+                  sideTitles: SideTitles(
+                    showTitles: true,
+                    reservedSize: 30,
+                    getTitlesWidget: (value, meta) {
+                      final idx = value.toInt();
+                      if (idx < 0 || idx >= _data.length)
+                        return const SizedBox();
+                      return Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Text(
+                          _data[idx].label.length > 8
+                              ? '${_data[idx].label.substring(0, 8)}...'
+                              : _data[idx].label,
+                          style: const TextStyle(
+                              fontSize: 10, fontWeight: FontWeight.w600),
+                          textAlign: TextAlign.center,
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ),
+              gridData: FlGridData(
+                show: true,
+                getDrawingHorizontalLine: (value) {
+                  return FlLine(
+                    color:
+                        Theme.of(context).colorScheme.outline.withOpacity(0.2),
+                    strokeWidth: 1,
+                  );
+                },
+                getDrawingVerticalLine: (value) {
+                  return FlLine(
+                    color: Colors.transparent,
+                    strokeWidth: 0,
+                  );
+                },
+              ),
+              borderData: FlBorderData(
+                show: true,
+                border: Border(
+                  bottom: BorderSide(
+                    color:
+                        Theme.of(context).colorScheme.outline.withOpacity(0.3),
+                    width: 1,
+                  ),
+                  left: BorderSide(
+                    color:
+                        Theme.of(context).colorScheme.outline.withOpacity(0.3),
+                    width: 1,
+                  ),
+                ),
+              ),
+              barTouchData: BarTouchData(
+                enabled: true,
+                touchTooltipData: BarTouchTooltipData(
+                  getTooltipItem: (group, groupIndex, rod, rodIndex) {
+                    final dataPoint = _data[group.x.toInt()];
+                    return BarTooltipItem(
+                      '${dataPoint.label}\n${dataPoint.value.toStringAsFixed(1)}',
+                      TextStyle(
+                        color: Theme.of(context).colorScheme.onInverseSurface,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        // Información adicional de las barras
+        SizedBox(
+          height: 60, // Altura fija para el resumen
+          child: _buildBarSummary(),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildBarSummary() {
+    final maxValue = _data.map((d) => d.value).reduce(math.max);
+    final maxIndex = _data.indexWhere((d) => d.value == maxValue);
+    final minValue = _data.map((d) => d.value).reduce(math.min);
+    final minIndex = _data.indexWhere((d) => d.value == minValue);
+
+    // Truncar etiquetas largas
+    final maxLabel = _data[maxIndex].label.length > 8
+        ? '${_data[maxIndex].label.substring(0, 8)}...'
+        : _data[maxIndex].label;
+    final minLabel = _data[minIndex].label.length > 8
+        ? '${_data[minIndex].label.substring(0, 8)}...'
+        : _data[minIndex].label;
+
+    return Container(
+      padding: const EdgeInsets.all(6),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceVariant.withOpacity(0.3),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceAround,
+        children: [
+          Flexible(
+            child: Column(
+              children: [
+                Icon(Icons.arrow_upward, size: 14, color: Colors.green),
+                Text(
+                  'Máximo',
+                  style: Theme.of(context)
+                      .textTheme
+                      .bodySmall
+                      ?.copyWith(fontSize: 10),
+                ),
+                Text(
+                  '$maxLabel: ${maxValue.toStringAsFixed(1)}',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 10,
+                      ),
+                  textAlign: TextAlign.center,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+          ),
+          Flexible(
+            child: Column(
+              children: [
+                Icon(Icons.arrow_downward, size: 14, color: Colors.red),
+                Text(
+                  'Mínimo',
+                  style: Theme.of(context)
+                      .textTheme
+                      .bodySmall
+                      ?.copyWith(fontSize: 10),
+                ),
+                Text(
+                  '$minLabel: ${minValue.toStringAsFixed(1)}',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 10,
+                      ),
+                  textAlign: TextAlign.center,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildChartFooter() {
+    final now = DateTime.now();
+    final dateString = '${now.day}/${now.month}/${now.year}';
+
+    return Container(
+      height: 30, // Altura fija para evitar overflow
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      child: Center(
+        child: Text(
+          'Gráfico ${_chartType} • $dateString • ${_data.length} elementos • 📱 Calculadora',
+          style: TextStyle(
+            fontSize: 10,
+            color: Theme.of(context).textTheme.bodySmall?.color,
+          ),
+          textAlign: TextAlign.center,
+          overflow: TextOverflow.ellipsis,
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final stats = _calculateStatistics();
+    final primary = Theme.of(context).colorScheme.primary;
+
+    return Scaffold(
+      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+      appBar: AppBar(
+        backgroundColor: primary,
+        elevation: 0,
+        title: Text('Estadísticas',
+            style: TextStyle(color: Theme.of(context).colorScheme.onPrimary)),
+        actions: [
+          IconButton(
+            icon: Icon(Icons.save),
+            tooltip: 'Guardar dataset',
+            onPressed: _saveCurrentDataset,
+          ),
+          IconButton(
+            icon: Icon(Icons.history,
+                color: Theme.of(context).colorScheme.onPrimary),
+            onPressed: _openDatasetsDialog,
+            tooltip: 'Historial',
+          ),
+        ],
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(20.0),
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 600),
+            child: Container(
+              decoration: BoxDecoration(
+                color: Theme.of(context).cardColor,
+                borderRadius: BorderRadius.circular(12),
+                boxShadow: [
+                  BoxShadow(
+                      color: const Color(0x0A000000),
+                      blurRadius: 6,
+                      offset: const Offset(0, 3)),
+                ],
+                border: Border.all(
+                    color: Theme.of(context)
+                        .dividerColor
+                        .withAlpha((0.12 * 255).round())),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: SingleChildScrollView(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Text('Paso a paso para crear un gráfico:',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.w700,
+                              color: primary)),
+                      const SizedBox(height: 12),
+
+                      // Tutorial y ejemplos sencillos
+                      Card(
+                        elevation: 2,
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12)),
+                        child: ExpansionTile(
+                          leading:
+                              Icon(Icons.lightbulb_outline, color: primary),
+                          title: Text(
+                            '💡 Tutorial y Ejemplos',
+                            style: TextStyle(
+                              fontWeight: FontWeight.w600,
+                              color: Colors.black87,
+                              fontSize: 16,
+                            ),
+                          ),
+                          children: [
+                            Padding(
+                              padding: const EdgeInsets.all(16),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    '📊 Cómo usar:',
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.w600,
+                                      fontSize: 16,
+                                      color: Colors.black87,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  _buildTutorialStep(
+                                      '1.', 'Agrega un título (opcional)'),
+                                  _buildTutorialStep('2.',
+                                      'Elige el tipo: Pie (circular) o Bar (barras)'),
+                                  _buildTutorialStep('3.',
+                                      'Ingresa datos como: nombre:valor,nombre:valor'),
+                                  _buildTutorialStep('4.',
+                                      'Ejemplo: Manzanas:5,Naranjas:3,Peras:2'),
+                                  const SizedBox(height: 16),
+                                  Text(
+                                    '🎯 Prueba estos ejemplos:',
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.w600,
+                                      fontSize: 16,
+                                      color: Colors.black87,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Wrap(
+                                    spacing: 8,
+                                    runSpacing: 8,
+                                    children: [
+                                      _buildExampleDataButton('Frutas',
+                                          'Manzanas:5,Naranjas:3,Peras:2'),
+                                      _buildExampleDataButton('Ventas',
+                                          'Enero:100,Febrero:150,Marzo:120'),
+                                      _buildExampleDataButton('Gastos',
+                                          'Comida:300,Transporte:150,Entretenimiento:100'),
+                                      _buildExampleDataButton(
+                                          'Notas', 'A:15,B:10,C:5,D:2'),
+                                    ],
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextFormField(
+                        controller: _titleController,
+                        maxLines: 1,
+                        decoration: InputDecoration(
+                          labelText: 'Título (opcional)',
+                          prefixIcon: Icon(Icons.title, color: primary),
+                          filled: true,
+                          fillColor: Theme.of(context)
+                              .colorScheme
+                              .primary
+                              .withAlpha((0.05 * 255).round()),
+                          border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12),
+                              borderSide: BorderSide.none),
+                          focusedBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12),
+                              borderSide: BorderSide(color: primary, width: 2)),
+                          labelStyle: TextStyle(color: primary),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      ToggleButtons(
+                        isSelected: [_chartType == 'Pie', _chartType == 'Bar'],
+                        onPressed: (i) =>
+                            setState(() => _chartType = i == 0 ? 'Pie' : 'Bar'),
+                        children: const [Text('Pie'), Text('Bar')],
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      const SizedBox(height: 12),
+                      _useStructuredInput
+                          ? _buildStructuredInput()
+                          : _buildFreeInput(),
+                      if (_errorMessage.isNotEmpty) ...[
+                        const SizedBox(height: 8),
+                        Text(_errorMessage,
+                            style: const TextStyle(color: Colors.redAccent)),
+                      ],
+                      const SizedBox(height: 12),
+                      RepaintBoundary(
+                        key: repaintKey,
+                        child: Container(
+                          padding: const EdgeInsets.all(16),
+                          decoration: BoxDecoration(
+                            color: Theme.of(context).colorScheme.surface,
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .outline
+                                  .withOpacity(0.3),
+                              width: 1,
+                            ),
+                          ),
+                          child: _data.isEmpty
+                              ? SizedBox(
+                                  height: 200,
+                                  child: Center(
+                                      child: Text('No hay datos aún',
+                                          style: TextStyle(
+                                              color: Theme.of(context)
+                                                  .textTheme
+                                                  .bodyMedium
+                                                  ?.color))),
+                                )
+                              : SizedBox(
+                                  height: 280, // Altura total fija
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.center,
+                                    children: [
+                                      // Título del gráfico (simplificado)
+                                      if (_titleController.text.isNotEmpty) ...[
+                                        SizedBox(
+                                          height: 25,
+                                          child: Text(
+                                            _titleController.text.length > 25
+                                                ? '${_titleController.text.substring(0, 25)}...'
+                                                : _titleController.text,
+                                            style: TextStyle(
+                                              fontSize: 14,
+                                              fontWeight: FontWeight.bold,
+                                              color: Theme.of(context)
+                                                  .colorScheme
+                                                  .primary,
+                                            ),
+                                            textAlign: TextAlign.center,
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        ),
+                                      ],
+                                      // Gráfico principal (altura fija)
+                                      SizedBox(
+                                        height: _titleController.text.isNotEmpty
+                                            ? 230
+                                            : 255,
+                                        child: _chartType == 'Pie'
+                                            ? _buildPie()
+                                            : _buildBar(),
+                                      ),
+                                      // Pie de página muy simplificado (altura fija)
+                                      SizedBox(
+                                        height: 25,
+                                        child: _buildChartFooter(),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                        ),
+                      ),
+                      // Botones fuera del RepaintBoundary
+                      if (_data.isNotEmpty) ...[
+                        const SizedBox(height: 12),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            ElevatedButton.icon(
+                              onPressed: _openFullscreenChart,
+                              icon: const Icon(Icons.open_in_full),
+                              label: const Text('Ver'),
+                            ),
+                            ElevatedButton.icon(
+                              onPressed: _shareChart,
+                              icon: const Icon(Icons.share),
+                              label: const Text('Compartir'),
+                            ),
+                          ],
+                        ),
+                      ],
+                      const SizedBox(height: 12),
+                      if (stats.isNotEmpty) ...[
+                        Text('Sum: ${stats['sum']!.toStringAsFixed(2)}'),
+                        Text('Mean: ${stats['mean']!.toStringAsFixed(2)}'),
+                        Text('Median: ${stats['median']!.toStringAsFixed(2)}'),
+                        Text('StdDev: ${stats['stdDev']!.toStringAsFixed(2)}'),
+                      ],
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          Expanded(
+                              child: ElevatedButton(
+                                  onPressed: _fillExample,
+                                  child: const Text('Ejemplo'))),
+                          const SizedBox(width: 8),
+                          Expanded(
+                              child: ElevatedButton(
+                                  onPressed: () => setState(() =>
+                                      _useStructuredInput =
+                                          !_useStructuredInput),
+                                  child: const Text('Alternar entrada'))),
+                        ],
+                      )
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildFreeInput() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        TextFormField(
+          controller: _dataController,
+          maxLines: 3,
+          decoration: InputDecoration(
+            labelText: 'Datos (ej: A:10,B:20,C:5)',
+            hintText: 'Etiqueta:valor separadas por comas',
+            filled: true,
+            fillColor: Theme.of(context)
+                .colorScheme
+                .primary
+                .withAlpha((0.05 * 255).round()),
+            border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide.none),
+            focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide(
+                    color: Theme.of(context).colorScheme.primary, width: 2)),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Expanded(
+                child: ElevatedButton(
+                    onPressed: () => _parseAndSet(_dataController.text),
+                    child: const Text('Crear'))),
+            const SizedBox(width: 8),
+            ElevatedButton(
+                onPressed: () => setState(() {
+                      _dataController.clear();
+                      _data = [];
+                      _errorMessage = '';
+                    }),
+                child: const Text('Limpiar')),
+          ],
+        )
+      ],
+    );
+  }
+
+  Widget _buildStructuredInput() {
+    return Column(
+      children: [
+        ListView.separated(
+          physics: const NeverScrollableScrollPhysics(),
+          shrinkWrap: true,
+          itemCount: _rows.length,
+          separatorBuilder: (_, __) => const SizedBox(height: 8),
+          itemBuilder: (_, i) {
+            final r = _rows[i];
+            return Row(
+              children: [
+                Expanded(
+                  child: TextFormField(
+                    controller: r.nameController,
+                    decoration: InputDecoration(
+                      labelText: 'Etiqueta',
+                      filled: true,
+                      fillColor: Theme.of(context)
+                          .colorScheme
+                          .primary
+                          .withAlpha((0.03 * 255).round()),
+                      border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide.none),
+                      focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide(
+                              color: Theme.of(context).colorScheme.primary,
+                              width: 2)),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                SizedBox(
+                  width: 110,
+                  child: TextFormField(
+                    controller: r.valueController,
+                    keyboardType:
+                        const TextInputType.numberWithOptions(decimal: true),
+                    decoration: InputDecoration(
+                      labelText: 'Valor',
+                      filled: true,
+                      fillColor: Theme.of(context)
+                          .colorScheme
+                          .primary
+                          .withAlpha((0.03 * 255).round()),
+                      border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide.none),
+                      focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide(
+                              color: Theme.of(context).colorScheme.primary,
+                              width: 2)),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Column(
+                  children: [
+                    IconButton(
+                      icon:
+                          Icon(Icons.color_lens, color: r.color ?? Colors.grey),
+                      onPressed: () async {
+                        final chosen = await showDialog<Color?>(
+                          context: context,
+                          builder: (_) => AlertDialog(
+                            title: const Text('Selecciona color'),
+                            content: SizedBox(
+                              width: double.maxFinite,
+                              child: Wrap(
+                                spacing: 8,
+                                runSpacing: 8,
+                                children: List.generate(
+                                  Colors.primaries.length,
+                                  (ci) => GestureDetector(
+                                    onTap: () => Navigator.pop(
+                                        context, Colors.primaries[ci]),
+                                    child: Container(
+                                      width: 36,
+                                      height: 36,
+                                      decoration: BoxDecoration(
+                                        color: Colors.primaries[ci],
+                                        borderRadius: BorderRadius.circular(6),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            actions: [
+                              TextButton(
+                                  onPressed: () => Navigator.pop(context),
+                                  child: const Text('Cancelar'))
+                            ],
+                          ),
+                        );
+                        if (chosen != null) {
+                          setState(() => r.color = chosen);
+                        }
+                      },
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.delete_outline),
+                      onPressed: _rows.length > 1 ? () => _removeRow(i) : null,
+                    ),
+                  ],
+                )
+              ],
+            );
+          },
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            ElevatedButton(onPressed: _addRow, child: const Text('Agregar')),
+            const SizedBox(width: 8),
+            ElevatedButton(onPressed: _processRows, child: const Text('Crear')),
+            const SizedBox(width: 8),
+            ElevatedButton(
+                onPressed: () => setState(() {
+                      // Reset structured input rows and data
+                      for (final r in _rows) r.dispose();
+                      _rows = [_EditablePoint()];
+                      _data = [];
+                      _errorMessage = '';
+                      _titleController.clear();
+                    }),
+                child: const Text('Limpiar')),
+          ],
+        )
+      ],
+    );
+  }
+
+  // Métodos auxiliares para el tutorial
+  Widget _buildTutorialStep(String number, String description) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 24,
+            height: 24,
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.primary,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Center(
+              child: Text(
+                number,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              description,
+              style: const TextStyle(
+                fontSize: 14,
+                color: Colors.black87,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildExampleDataButton(String label, String data) {
+    final primary = Theme.of(context).colorScheme.primary;
+    return ElevatedButton(
+      onPressed: () {
+        setState(() {
+          _dataController.text = data;
+          _titleController.text = label;
+          _useStructuredInput = false;
+        });
+        _parseAndSet(data);
+      },
+      style: ElevatedButton.styleFrom(
+        backgroundColor: primary.withOpacity(0.1),
+        foregroundColor: primary,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(8),
+          side: BorderSide(color: primary.withOpacity(0.3)),
+        ),
+        elevation: 1,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            label,
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          Text(
+            data.length > 20 ? '${data.substring(0, 20)}...' : data,
+            style: const TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.normal,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class StatisticsChartView extends StatelessWidget {
+  final List<ChartDataPoint> data;
+  final String title;
+  final String chartType;
+
+  const StatisticsChartView(
+      {Key? key,
+      required this.data,
+      required this.title,
+      required this.chartType})
+      : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    final primary = Theme.of(context).colorScheme.primary;
+    return Scaffold(
+      appBar: AppBar(
+          title: Text(title.isNotEmpty ? title : 'Gráfico'),
+          backgroundColor: primary),
+      body: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 800),
+          child: Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Container(
+              decoration: BoxDecoration(
+                color: Theme.of(context).cardColor,
+                borderRadius: BorderRadius.circular(12),
+                boxShadow: [
+                  BoxShadow(
+                      color: const Color(0x0A000000),
+                      blurRadius: 6,
+                      offset: const Offset(0, 3))
+                ],
+                border: Border.all(
+                    color: Theme.of(context)
+                        .dividerColor
+                        .withAlpha((0.12 * 255).round())),
+              ),
+              padding: const EdgeInsets.all(12),
+              child: chartType == 'Pie' ? _pieView() : _barView(),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _pieView() {
+    final sum = data.fold(0.0, (a, b) => a + b.value);
+    return SizedBox(
+      height: 420,
+      child: PieChart(
+        PieChartData(
+          centerSpaceRadius: 48,
+          sectionsSpace: 6,
+          sections: data.asMap().entries.map((e) {
+            final i = e.key;
+            final d = e.value;
+            final color =
+                d.color ?? Colors.primaries[i % Colors.primaries.length];
+            final percent = sum > 0 ? (d.value / sum) * 100 : 0.0;
+            return PieChartSectionData(
+              value: d.value,
+              color: color,
+              radius: 100,
+              title: '${d.label}\n${percent.toStringAsFixed(1)}%',
+              titleStyle: const TextStyle(
+                  fontSize: 14,
+                  color: Colors.white,
+                  fontWeight: FontWeight.w900),
+              titlePositionPercentageOffset: 0.55,
+            );
+          }).toList(),
+        ),
+      ),
+    );
+  }
+
+  Widget _barView() {
+    final maxVal = data.map((d) => d.value).reduce(math.max);
+    final barGroups = data.asMap().entries.map((e) {
+      final i = e.key;
+      final d = e.value;
+      return BarChartGroupData(
+        x: i,
+        barRods: [
+          BarChartRodData(
+            toY: d.value,
+            width: 28,
+            color: d.color ?? Colors.primaries[i % Colors.primaries.length],
+            borderRadius: BorderRadius.circular(6),
+          ),
+        ],
+      );
+    }).toList();
+
+    return SizedBox(
+      height: 420,
+      child: BarChart(
+        BarChartData(
+          maxY: maxVal * 1.15,
+          barGroups: barGroups,
+          gridData: const FlGridData(show: true),
+          titlesData: FlTitlesData(
+            leftTitles:
+                const AxisTitles(sideTitles: SideTitles(showTitles: true)),
+            bottomTitles: AxisTitles(
+              sideTitles: SideTitles(
+                showTitles: true,
+                getTitlesWidget: (value, meta) {
+                  final idx = value.toInt();
+                  if (idx < 0 || idx >= data.length) return const SizedBox();
+                  return Text(data[idx].label,
+                      style: const TextStyle(
+                          fontSize: 12, fontWeight: FontWeight.w800));
+                },
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Splash screen profesional con gradiente -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Fondo con gradiente profesional -->
+    <item>
+        <shape android:shape="rectangle">
+            <gradient
+                android:angle="135"
+                android:startColor="#FF1A237E"
+                android:centerColor="#FF283593"
+                android:endColor="#FF0D1421"
+                android:type="linear" />
+        </shape>
+    </item>
+
+    <!-- Icono centrado con sombra sutil -->
+    <item>
+        <bitmap
+            android:gravity="center"
+            android:src="@mipmap/ic_launcher" />
+    </item>
+</layer-list>
